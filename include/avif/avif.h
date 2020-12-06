@@ -558,6 +558,8 @@ typedef struct avifRGBImage
     avifBool ignoreAlpha;        // Used for XRGB formats, treats formats containing alpha (such as ARGB) as if they were
                                  // RGB, treating the alpha bits as if they were all 1.
     avifBool alphaPremultiplied; // indicates if RGB value is pre-multiplied by alpha. Default: false
+    avifBool useSharpYUVConversion; // Use a slower algorithm to downsample RGB into non-4:4:4 UV.
+                                    // This gives better result than the default fast method.
 
     uint8_t * pixels;
     uint32_t rowBytes;

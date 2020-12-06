@@ -50,6 +50,7 @@ uint64_t avifHTON64(uint64_t l);
 uint64_t avifNTOH64(uint64_t l);
 
 void avifCalcYUVCoefficients(const avifImage * image, float * outR, float * outG, float * outB);
+avifBool avifTransferCharacteristicsGetConverter(avifTransferCharacteristics atc, float (*converter[2])(float));
 
 #define AVIF_ARRAY_DECLARE(TYPENAME, ITEMSTYPE, ITEMSNAME) \
     typedef struct TYPENAME                                \
@@ -86,6 +87,7 @@ typedef struct avifAlphaParams
 
 } avifAlphaParams;
 
+avifBool avifCheckAlphaOpaque(const struct avifAlphaParams * const params);
 avifBool avifFillAlpha(const avifAlphaParams * const params);
 avifBool avifReformatAlpha(const avifAlphaParams * const params);
 
@@ -120,6 +122,7 @@ typedef struct avifReformatState
     uint32_t rgbOffsetBytesA;
 
     uint32_t yuvDepth;
+    uint32_t rgbDepth;
     avifRange yuvRange;
     int yuvMaxChannel;
     int rgbMaxChannel;
@@ -138,9 +141,12 @@ typedef struct avifReformatState
     float unormFloatTableUV[1 << 12];
 
     avifReformatMode mode;
-    // Used by avifImageYUVToRGB() only. avifImageRGBToYUV() uses a local variable (alphaMode) instead.
+    avifAlphaMultiplyMode toYUVAlphaMode;
     avifAlphaMultiplyMode toRGBAlphaMode;
 } avifReformatState;
+
+int avifReformatStateYToUNorm(const avifReformatState * state, float v);
+int avifReformatStateUVToUNorm(const avifReformatState * state, float v);
 
 // Returns:
 // * AVIF_RESULT_OK              - Converted successfully with libyuv
@@ -154,6 +160,12 @@ avifResult avifImageYUVToRGBLibYUV(const avifImage * image, avifRGBImage * rgb);
 // * [any other error]           - Return error to caller
 avifResult avifRGBImagePremultiplyAlphaLibYUV(avifRGBImage * rgb);
 avifResult avifRGBImageUnpremultiplyAlphaLibYUV(avifRGBImage * rgb);
+
+// Returns:
+// * AVIF_RESULT_OK               - Converted successfully using sharp_yuv method
+// * AVIF_RESULT_INVALID_ARGUMENT - Sharp YUV doesn't improve quality with the specific matrixCoefficient, use normal conversion
+// * [any other error]            - Return error to caller
+avifResult avifImageRGBtoYUVSharp(avifImage * image, const avifRGBImage * rgb, avifReformatState * state);
 
 // ---------------------------------------------------------------------------
 // avifCodecDecodeInput

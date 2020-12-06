@@ -240,7 +240,7 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
 // longjmp. But GCC's -Wclobbered warning may have trouble figuring that out, so
 // we preemptively declare it as volatile.
 
-avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFormat requestedFormat, uint32_t requestedDepth)
+avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFormat requestedFormat, uint32_t requestedDepth, avifBool useSharpYUV)
 {
     volatile avifBool ret = AVIF_FALSE;
     uint8_t * volatile iccData = NULL;
@@ -305,6 +305,7 @@ avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFor
         avifRGBImageSetDefaults(&rgb, avif);
         rgb.format = AVIF_RGB_FORMAT_RGB;
         rgb.depth = 8;
+        rgb.useSharpYUVConversion = useSharpYUV;
         avifRGBImageAllocatePixels(&rgb);
 
         int row = 0;

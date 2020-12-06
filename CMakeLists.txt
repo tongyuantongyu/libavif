@@ -206,6 +206,7 @@ set(AVIF_SRCS
     src/read.c
     src/reformat.c
     src/reformat_libyuv.c
+    src/reformat_sharp_yuv.c
     src/stream.c
     src/utils.c
     src/write.c
