@@ -15,6 +15,34 @@ static int calcMaxChannel(uint32_t depth, avifRange range)
     return maxChannel;
 }
 
+avifBool avifCheckAlphaOpaque(const avifAlphaParams * const params)
+{
+    if (params->srcDepth > 8) {
+        const uint16_t maxChannel = (uint16_t)calcMaxChannel(params->srcDepth, params->srcRange);
+        for (uint32_t j = 0; j < params->height; ++j) {
+            uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
+            for (uint32_t i = 0; i < params->width; ++i) {
+                if (*((uint16_t *)srcRow) != maxChannel) {
+                    return AVIF_FALSE;
+                }
+                srcRow += params->srcPixelBytes;
+            }
+        }
+    } else {
+        const uint8_t maxChannel = (uint8_t)calcMaxChannel(params->srcDepth, params->srcRange);
+        for (uint32_t j = 0; j < params->height; ++j) {
+            uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
+            for (uint32_t i = 0; i < params->width; ++i) {
+                if (*srcRow != maxChannel) {
+                    return AVIF_FALSE;
+                }
+                srcRow += params->srcPixelBytes;
+            }
+        }
+    }
+    return AVIF_TRUE;
+}
+
 avifBool avifFillAlpha(const avifAlphaParams * const params)
 {
     if (params->dstDepth > 8) {

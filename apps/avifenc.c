@@ -65,6 +65,7 @@ static void syntax(void)
     printf("                                        M = matrix coefficients\n");
     printf("                                        (use 2 for any you wish to leave unspecified)\n");
     printf("    -r,--range RANGE                  : YUV range [limited or l, full or f]. (JPEG/PNG only, default: full; For y4m or stdin, range is retained)\n");
+    printf("    --sharp_yuv                       : Use sharper (and slower) RGB->YUV conversion (YUV422/YUV420 only; NCL MC only)\n");
     printf("    --min Q                           : Set min quantizer for color (%d-%d, where %d is lossless)\n",
            AVIF_QUANTIZER_BEST_QUALITY,
            AVIF_QUANTIZER_WORST_QUALITY,
@@ -254,7 +255,7 @@ static avifBool avifInputHasRemainingData(avifInput * input)
     return (input->fileIndex < input->filesCount);
 }
 
-static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image, uint32_t * outDepth, avifAppSourceTiming * sourceTiming)
+static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image, uint32_t * outDepth, avifAppSourceTiming * sourceTiming, avifBool useSharpYUV)
 {
     if (sourceTiming) {
         // A source timing of all 0s is a sentinel value hinting that the value is unset / should be
@@ -287,14 +288,14 @@ static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image
             *outDepth = image->depth;
         }
     } else if (nextInputFormat == AVIF_APP_FILE_FORMAT_JPEG) {
-        if (!avifJPEGRead(input->files[input->fileIndex].filename, image, input->requestedFormat, input->requestedDepth)) {
+        if (!avifJPEGRead(input->files[input->fileIndex].filename, image, input->requestedFormat, input->requestedDepth, useSharpYUV)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
         if (outDepth) {
             *outDepth = 8;
         }
     } else if (nextInputFormat == AVIF_APP_FILE_FORMAT_PNG) {
-        if (!avifPNGRead(input->files[input->fileIndex].filename, image, input->requestedFormat, input->requestedDepth, outDepth)) {
+        if (!avifPNGRead(input->files[input->fileIndex].filename, image, input->requestedFormat, input->requestedDepth, outDepth, useSharpYUV)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
     } else {
@@ -466,6 +467,7 @@ int main(int argc, char * argv[])
     // for any frame that doesn't have a specific duration set on the commandline. See the
     // declaration of avifAppSourceTiming for more documentation.
     avifAppSourceTiming outputTiming = { 0, 0 };
+    avifBool useSharpYUV = AVIF_FALSE;
 
     // By default, the color profile itself is unspecified, so CP/TC are set (to 2) accordingly.
     // However, if the end-user doesn't specify any CICP, we will convert to YUV using BT601
@@ -754,6 +756,8 @@ int main(int argc, char * argv[])
             matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_IDENTITY; // this is key for lossless
         } else if (!strcmp(arg, "-p") || !strcmp(arg, "--premultiply")) {
             premultiplyAlpha = AVIF_TRUE;
+        } else if (!strcmp(arg, "--sharp_yuv")) {
+            useSharpYUV = AVIF_TRUE;
         } else {
             // Positional argument
             input.files[input.filesCount].filename = arg;
@@ -809,10 +813,27 @@ int main(int argc, char * argv[])
         }
     }
 
+    if (useSharpYUV) {
+        if (image->yuvFormat == AVIF_PIXEL_FORMAT_YUV444 || image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400) {
+            fprintf(stderr, "WARNING: [--sharp_yuv] Sharp YUV conversion only improve quality on YUV422 and YUV420 subsampling mode.\n");
+            useSharpYUV = AVIF_FALSE;
+        }
+
+        if ((image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ||
+            (image->matrixCoefficients == 3 /* CICP reserved */) || (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_BT2020_CL) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_SMPTE2085) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_CL) ||
+            (image->matrixCoefficients >= AVIF_MATRIX_COEFFICIENTS_ICTCP)) {
+            fprintf(stderr, "WARNING: [--sharp_yuv] Sharp YUV conversion only improve quality on non-constant luminance matrix coefficients.\n");
+            useSharpYUV = AVIF_FALSE;
+        }
+    }
+
     avifInputFile * firstFile = avifInputGetNextFile(&input);
     uint32_t sourceDepth = 0;
     avifAppSourceTiming firstSourceTiming;
-    avifAppFileFormat inputFormat = avifInputReadImage(&input, image, &sourceDepth, &firstSourceTiming);
+    avifAppFileFormat inputFormat = avifInputReadImage(&input, image, &sourceDepth, &firstSourceTiming, useSharpYUV);
     if (inputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
         fprintf(stderr, "Cannot determine input file format: %s\n", firstFile->filename);
         returnCode = 1;
@@ -1020,7 +1041,7 @@ int main(int argc, char * argv[])
             cellImage->alphaPremultiplied = image->alphaPremultiplied;
             gridCells[gridCellIndex] = cellImage;
 
-            avifAppFileFormat nextInputFormat = avifInputReadImage(&input, cellImage, NULL, NULL);
+            avifAppFileFormat nextInputFormat = avifInputReadImage(&input, cellImage, NULL, NULL, useSharpYUV);
             if (nextInputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
                 returnCode = 1;
                 goto cleanup;
@@ -1159,7 +1180,7 @@ int main(int argc, char * argv[])
             nextImage->yuvRange = image->yuvRange;
             nextImage->alphaPremultiplied = image->alphaPremultiplied;
 
-            avifAppFileFormat nextInputFormat = avifInputReadImage(&input, nextImage, NULL, NULL);
+            avifAppFileFormat nextInputFormat = avifInputReadImage(&input, nextImage, NULL, NULL, useSharpYUV);
             if (nextInputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
                 returnCode = 1;
                 goto cleanup;
