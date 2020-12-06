@@ -42,6 +42,7 @@ typedef struct avifInput
     struct y4mFrameIterator * frameIter;
     avifPixelFormat requestedFormat;
     int requestedDepth;
+    avifBool useSharpYUV;
     avifBool useStdin;
 } avifInput;
 
@@ -65,6 +66,7 @@ static void syntax(void)
     printf("                                        M = matrix coefficients\n");
     printf("                                        (use 2 for any you wish to leave unspecified)\n");
     printf("    -r,--range RANGE                  : YUV range [limited or l, full or f]. (JPEG/PNG only, default: full; For y4m or stdin, range is retained)\n");
+    printf("    --sharp_yuv                       : Use sharper (and slower) RGB->YUV conversion (YUV422/YUV420 only; NCL MC only)\n");
     printf("    --min Q                           : Set min quantizer for color (%d-%d, where %d is lossless)\n",
            AVIF_QUANTIZER_BEST_QUALITY,
            AVIF_QUANTIZER_WORST_QUALITY,
@@ -281,6 +283,7 @@ static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image
     const avifAppFileFormat nextInputFormat = avifReadImage(input->files[input->fileIndex].filename,
                                                             input->requestedFormat,
                                                             input->requestedDepth,
+                                                            input->useSharpYUV,
                                                             image,
                                                             outDepth,
                                                             sourceTiming,
@@ -743,6 +746,8 @@ int main(int argc, char * argv[])
             matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_IDENTITY; // this is key for lossless
         } else if (!strcmp(arg, "-p") || !strcmp(arg, "--premultiply")) {
             premultiplyAlpha = AVIF_TRUE;
+        } else if (!strcmp(arg, "--sharp_yuv")) {
+            input.useSharpYUV = AVIF_TRUE;
         } else {
             // Positional argument
             input.files[input.filesCount].filename = arg;
@@ -795,6 +800,23 @@ int main(int argc, char * argv[])
             // Only warn if someone explicitly asked for identity.
             printf("WARNING: matrixCoefficients may not be set to identity (0) when subsampling. Resetting MC to defaults (%d).\n",
                    image->matrixCoefficients);
+        }
+    }
+
+    if (input.useSharpYUV) {
+        if (image->yuvFormat == AVIF_PIXEL_FORMAT_YUV444 || image->yuvFormat == AVIF_PIXEL_FORMAT_YUV400) {
+            fprintf(stderr, "WARNING: [--sharp_yuv] Sharp YUV conversion only improve quality on YUV422 and YUV420 subsampling mode.\n");
+            input.useSharpYUV = AVIF_FALSE;
+        }
+
+        if ((image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ||
+            (image->matrixCoefficients == 3 /* CICP reserved */) || (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_YCGCO) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_BT2020_CL) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_SMPTE2085) ||
+            (image->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_CL) ||
+            (image->matrixCoefficients >= AVIF_MATRIX_COEFFICIENTS_ICTCP)) {
+            fprintf(stderr, "WARNING: [--sharp_yuv] Sharp YUV conversion only improve quality on non-constant luminance matrix coefficients.\n");
+            input.useSharpYUV = AVIF_FALSE;
         }
     }
 

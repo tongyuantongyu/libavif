@@ -50,6 +50,7 @@ uint64_t avifHTON64(uint64_t l);
 uint64_t avifNTOH64(uint64_t l);
 
 void avifCalcYUVCoefficients(const avifImage * image, float * outR, float * outG, float * outB);
+avifBool avifTransferCharacteristicsGetConverter(avifTransferCharacteristics atc, float (*converter[2])(float));
 
 #define AVIF_ARRAY_DECLARE(TYPENAME, ITEMSTYPE, ITEMSNAME) \
     typedef struct TYPENAME                                \
@@ -65,28 +66,6 @@ void * avifArrayPushPtr(void * arrayStruct);
 void avifArrayPush(void * arrayStruct, void * element);
 void avifArrayPop(void * arrayStruct);
 void avifArrayDestroy(void * arrayStruct);
-
-typedef struct avifAlphaParams
-{
-    uint32_t width;
-    uint32_t height;
-
-    uint32_t srcDepth;
-    uint8_t * srcPlane;
-    uint32_t srcRowBytes;
-    uint32_t srcOffsetBytes;
-    uint32_t srcPixelBytes;
-
-    uint32_t dstDepth;
-    uint8_t * dstPlane;
-    uint32_t dstRowBytes;
-    uint32_t dstOffsetBytes;
-    uint32_t dstPixelBytes;
-
-} avifAlphaParams;
-
-avifBool avifFillAlpha(const avifAlphaParams * const params);
-avifBool avifReformatAlpha(const avifAlphaParams * const params);
 
 typedef enum avifReformatMode
 {
@@ -119,6 +98,7 @@ typedef struct avifReformatState
     uint32_t rgbOffsetBytesA;
 
     uint32_t yuvDepth;
+    uint32_t rgbDepth;
     avifRange yuvRange;
     int yuvMaxChannel;
     int rgbMaxChannel;
@@ -135,9 +115,12 @@ typedef struct avifReformatState
     float unormFloatTableUV[1 << 12];
 
     avifReformatMode mode;
-    // Used by avifImageYUVToRGB() only. avifImageRGBToYUV() uses a local variable (alphaMode) instead.
+    avifAlphaMultiplyMode toYUVAlphaMode;
     avifAlphaMultiplyMode toRGBAlphaMode;
 } avifReformatState;
+
+int avifReformatStateYToUNorm(const avifReformatState * state, float v);
+int avifReformatStateUVToUNorm(const avifReformatState * state, float v);
 
 // Returns:
 // * AVIF_RESULT_OK              - Converted successfully with libyuv
@@ -157,6 +140,30 @@ avifResult avifRGBImageToF16LibYUV(avifRGBImage * rgb);
 // * [any other error]           - Return error to caller
 avifResult avifRGBImagePremultiplyAlphaLibYUV(avifRGBImage * rgb);
 avifResult avifRGBImageUnpremultiplyAlphaLibYUV(avifRGBImage * rgb);
+
+// Returns:
+// * AVIF_RESULT_OK               - Converted successfully using sharp_yuv method
+// * AVIF_RESULT_INVALID_ARGUMENT - Sharp YUV doesn't improve quality with the specific matrixCoefficient, use normal conversion
+// * [any other error]            - Return error to caller
+avifResult avifImageRGBtoYUVSharp(avifImage * image, const avifRGBImage * rgb, avifReformatState * state);
+
+typedef struct avifAlphaData
+{
+    uint32_t width;
+    uint32_t height;
+
+    uint32_t depth;
+    uint8_t * plane;
+    uint32_t rowBytes;
+    uint32_t offsetBytes;
+    uint32_t pixelBytes;
+} avifAlphaData;
+
+void avifAlphaDataFromAvifImage(avifAlphaData * data, const avifImage * image);
+void avifAlphaDataFromAvifRGBImage(avifAlphaData * data, const avifRGBImage * rgb, const avifReformatState * state);
+avifBool avifCheckAlphaOpaque(const avifAlphaData * const src);
+avifBool avifFillAlpha(const avifAlphaData * const dst);
+avifBool avifReformatAlpha(const avifAlphaData * const src, const avifAlphaData * const dst);
 
 // ---------------------------------------------------------------------------
 // Scaling

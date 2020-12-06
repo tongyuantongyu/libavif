@@ -564,6 +564,8 @@ typedef struct avifRGBImage
                                  // RGB, treating the alpha bits as if they were all 1.
     avifBool alphaPremultiplied; // indicates if RGB value is pre-multiplied by alpha. Default: false
     avifBool isFloat; // indicates if RGBA values are in half float (f16) format. Valid only when depth == 16. Default: false
+    avifBool useSharpYUVConversion; // Use a slower algorithm to downsample RGB into non-4:4:4 UV.
+                                    // This gives better result than the default fast method.
 
     uint8_t * pixels;
     uint32_t rowBytes;
