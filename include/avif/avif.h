@@ -267,6 +267,9 @@ enum
 };
 typedef uint16_t avifTransferCharacteristics; // AVIF_TRANSFER_CHARACTERISTICS_*
 
+AVIF_API float avifTransferCharacteristicsToLinear(avifTransferCharacteristics atc, float in);
+AVIF_API float avifTransferCharacteristicsFromLinear(avifTransferCharacteristics atc, float in);
+
 enum
 {
     AVIF_MATRIX_COEFFICIENTS_IDENTITY = 0,
@@ -513,6 +516,7 @@ typedef enum avifReformatMode
     AVIF_REFORMAT_MODE_IDENTITY,             // Pack GBR directly into YUV planes (AVIF_MATRIX_COEFFICIENTS_IDENTITY)
     AVIF_REFORMAT_MODE_YCGCO,                // YUV conversion using AVIF_MATRIX_COEFFICIENTS_YCGCO
     AVIF_REFORMAT_MODE_SMPTE2085,            // YUV conversion using AVIF_MATRIX_COEFFICIENTS_SMPTE2085
+    AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE    // Constant Luminance YUV conversion using coefficients
 } avifReformatMode;
 
 typedef struct avifReformatState
@@ -541,6 +545,13 @@ typedef struct avifReformatState
     float biasUV;  // the value of 0.5 for the appropriate bit depth [128, 512, 2048]
     float rangeY;  // difference between max and min Y
     float rangeUV; // difference between max and min UV
+
+    // Only used in constant luminance mode.
+    // Absolute of n(egative) or p(ositive) extremum of B(Cb, U) or R(Cr, V)
+    float nB;
+    float pB;
+    float nR;
+    float pR;
 
     avifPixelFormatInfo formatInfo;
 

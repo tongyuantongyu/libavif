@@ -4,9 +4,9 @@
 #include "avif/internal.h"
 
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <string.h>
-#include <float.h>
 
 struct YUVBlock
 {
@@ -52,9 +52,12 @@ avifBool avifPrepareReformatState(const avifImage * image, const avifRGBImage * 
             state->mode = AVIF_REFORMAT_MODE_SMPTE2085;
             break;
 
-        // These matrix coefficients values are currently unsupported. Revise this list as more support is added.
         case AVIF_MATRIX_COEFFICIENTS_BT2020_CL:
         case AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_CL:
+            state->mode = AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE;
+            break;
+
+        // These matrix coefficients values are currently unsupported. Revise this list as more support is added.
         case AVIF_MATRIX_COEFFICIENTS_ICTCP:
         // CICP reserved
         case 3:
@@ -66,7 +69,7 @@ avifBool avifPrepareReformatState(const avifImage * image, const avifRGBImage * 
     avifGetPixelFormatInfo(image->yuvFormat, &state->formatInfo);
     avifCalcYUVCoefficients(image, &state->kr, &state->kg, &state->kb);
 
-    if (state->mode != AVIF_REFORMAT_MODE_YUV_COEFFICIENTS) {
+    if (state->mode != AVIF_REFORMAT_MODE_YUV_COEFFICIENTS && state->mode != AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE) {
         state->kr = 0.0f;
         state->kg = 0.0f;
         state->kb = 0.0f;
@@ -130,10 +133,19 @@ avifBool avifPrepareReformatState(const avifImage * image, const avifRGBImage * 
     state->rangeY = (state->yuvRange == AVIF_RANGE_LIMITED) ? (float)(219 << (state->yuvDepth - 8)) : state->yuvMaxChannelF;
     state->rangeUV = (state->yuvRange == AVIF_RANGE_LIMITED) ? (float)(224 << (state->yuvDepth - 8)) : state->yuvMaxChannelF;
 
+    if (state->mode == AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE) {
+        // Formulas 65,66,67,68 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+        state->pB = 1 - avifTransferCharacteristicsFromLinear(image->transferCharacteristics, state->kb);
+        state->nB = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, 1 - state->kb);
+        state->pR = 1 - avifTransferCharacteristicsFromLinear(image->transferCharacteristics, state->kr);
+        state->nR = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, 1 - state->kr);
+    }
+
     uint32_t cpCount = 1 << image->depth;
     switch (state->mode) {
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
+        case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
             for (uint32_t cp = 0; cp < cpCount; ++cp) {
                 state->unormFloatTableY[cp] = ((float)cp - state->biasY) / state->rangeY;
                 state->unormFloatTableUV[cp] = ((float)cp - state->biasUV) / state->rangeUV;
@@ -167,6 +179,7 @@ static int avifReformatStateYToUNorm(avifReformatState * state, float v)
     switch (state->mode) {
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
+        case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
             unorm = (int)avifRoundf(v * state->rangeY + state->biasY);
             break;
 
@@ -174,7 +187,6 @@ static int avifReformatStateYToUNorm(avifReformatState * state, float v)
         case AVIF_REFORMAT_MODE_YCGCO:
             unorm = (int)avifRoundf(v * state->yuvMaxChannelF);
             break;
-
     }
 
     return AVIF_CLAMP(unorm, 0, state->yuvMaxChannel);
@@ -187,6 +199,7 @@ static int avifReformatStateUVToUNorm(avifReformatState * state, float v)
     switch (state->mode) {
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
+        case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
             unorm = (int)avifRoundf(v * state->rangeUV + state->biasUV);
             break;
 
@@ -346,6 +359,20 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
                             break;
                         }
 
+                        case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE: {
+                            // Formulas 59,60,61,62,63,64 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                            float RC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[0]);
+                            float GC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[1]);
+                            float BC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[2]);
+                            float Y = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, kr * RC + kg * GC + kb * BC);
+                            float Cb = rgbPixel[2] - Y;
+                            float Cr = rgbPixel[0] - Y;
+
+                            yuvBlock[bI][bJ].y = Y;
+                            yuvBlock[bI][bJ].u = Cb / (2 * (Cb > 0 ? state.pB : state.nB));
+                            yuvBlock[bI][bJ].v = Cr / (2 * (Cr > 0 ? state.pR : state.nR));
+                            break;
+                        }
                     }
 
                     if (state.yuvChannelBytes > 1) {
@@ -683,6 +710,19 @@ static avifResult avifImageYUVAnyToRGBAnySlow(const avifImage * image,
                         B = 1.0136169298354088829f * Y + 2.0272338596708177659f * Cb;
                         R = 0.991902f * Y + 2.0f * Cr;
                         break;
+
+                    case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE: {
+                        // Constant Luminance: Formulas 59,60,61,62,63,64 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                        R = Y + Cr * (2 * (Cr > 0 ? state->pR : state->nR));
+                        B = Y + Cb * (2 * (Cb > 0 ? state->pB : state->nB));
+
+                        float YC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, Y);
+                        float RC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, R);
+                        float BC = avifTransferCharacteristicsToLinear(image->transferCharacteristics, B);
+                        G = avifTransferCharacteristicsFromLinear(image->transferCharacteristics,
+                                                                  (YC - state->kr * RC - state->kb * BC) / state->kg);
+                        break;
+                    }
                 }
             } else {
                 // Monochrome: just populate all channels with luma (identity mode is irrelevant)
@@ -1340,4 +1380,264 @@ int avifFullToLimitedUV(int depth, int v)
             break;
     }
     return v;
+}
+
+static float avifPQOOTF(float in)
+{
+    const float ext = 59.49080238715351253324f;
+    if (in < 0.0f) {
+        in = 0.0f;
+    } else if (in < (0.018053968510807f / ext)) {
+        in = in * 4.5f * ext;
+    } else if (in < 1.0f) {
+        in = 1.09929682680944f * powf(in * ext, 0.45f) - 0.09929682680944f;
+    } else {
+        in = 6.812920690579612855f;
+    }
+
+    in = powf(in, 2.4f);
+    return in / 100.0f;
+}
+
+static float avifPQInverseOOTF(float in)
+{
+    const float ext = 59.49080238715351253324f;
+
+    in = powf(100 * in, 1.0f / 2.4f);
+
+    if (in < 0.0f) {
+        in = 0.0f;
+    } else if (in < 4.5f * 0.018053968510807f) {
+        in = in / 4.5f;
+    } else if (in < 6.812920690579612855f) {
+        in = powf((in + 0.09929682680944f) / 1.09929682680944f, 1.0f / 0.45f);
+    } else {
+        in = ext;
+    }
+
+    return in / ext;
+}
+
+float avifTransferCharacteristicsToLinear(avifTransferCharacteristics atc, const float in)
+{
+    switch (atc) {
+        case AVIF_TRANSFER_CHARACTERISTICS_BT709:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT601:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT2020_10BIT:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT2020_12BIT: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 4.5f * 0.018053968510807f) {
+                return in / 4.5f;
+            } else if (in < 1.0f) {
+                return powf((in + 0.09929682680944f) / 1.09929682680944f, 1.0f / 0.45f);
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED:
+        case AVIF_TRANSFER_CHARACTERISTICS_UNKNOWN:
+        case AVIF_TRANSFER_CHARACTERISTICS_SRGB: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 12.92f * 0.0030412825601275209f) {
+                return in / 12.92f;
+            } else if (in < 1.0f) {
+                return powf((in + 0.0550107189475866f) / 1.0550107189475866f, 2.4f);
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT470M:
+            return powf(AVIF_CLAMP(in, 0.0f, 1.0f), 1.0f / 2.2f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT470BG:
+            return powf(AVIF_CLAMP(in, 0.0f, 1.0f), 1.0f / 2.8f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE240: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 4.0f * 0.022821585529445f) {
+                return in / 4.0f;
+            } else if (in < 1.0f) {
+                return powf((in + 0.111572195921731f) / 1.111572195921731f, 1.0f / 0.45f);
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LINEAR:
+            return AVIF_CLAMP(in, 0.0f, 1.0f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LOG100:
+            return in <= 0.01f ? 0.0f : 1.0f + log10f(AVIF_MIN(in, 1.0f)) / 2.0f;
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LOG100_SQRT10:
+            return in <= 0.00316227766f ? 0.0f : 1.0f + log10f(AVIF_MIN(in, 1.0f)) / 2.5f;
+
+        case AVIF_TRANSFER_CHARACTERISTICS_IEC61966: {
+            if (in < -4.5f * 0.018053968510807f) {
+                return powf((-in + 0.09929682680944f) / -1.09929682680944f, 1.0f / 0.45f);
+            } else if (in < 4.5f * 0.018053968510807f) {
+                return in / 4.5f;
+            } else {
+                return powf((in + 0.09929682680944f) / 1.09929682680944f, 1.0f / 0.45f);
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT1361: {
+            if (in < -0.25f) {
+                return -0.25f;
+            } else if (in < 0.0f) {
+                return powf((in - 0.02482420670236f) / -0.27482420670236f, 1.0f / 0.45f) / -4.0f;
+            } else if (in < 4.5f * 0.018053968510807f) {
+                return in / 4.5f;
+            } else if (in < 1.0f) {
+                return powf((in + 0.09929682680944f) / 1.09929682680944f, 1.0f / 0.45f);
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084: {
+            if (in > 0.0f) {
+                float powin = powf(in, 1.0f / 78.84375f);
+                float num = AVIF_MAX(powin - 0.8359375f, 0.0f);
+                float den = AVIF_MAX(18.8515625f - 18.6875f * powin, FLT_MIN);
+                return avifPQInverseOOTF(powf(num / den, 1.0f / 0.1593017578125f));
+            } else {
+                return 0.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE428:
+            return powf(0.91655527974030934f * AVIF_MAX(in, 0.0f), 1.0f / 2.6f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_HLG: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in <= 0.5f) {
+                return (in * in) / 3.0f;
+            } else {
+                return (expf((in - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
+            }
+        }
+    }
+
+    // Shouldn't reach here
+    return 0.0f;
+}
+
+float avifTransferCharacteristicsFromLinear(avifTransferCharacteristics atc, const float in)
+{
+    switch (atc) {
+        case AVIF_TRANSFER_CHARACTERISTICS_BT709:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT601:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT2020_10BIT:
+        case AVIF_TRANSFER_CHARACTERISTICS_BT2020_12BIT: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 0.018053968510807f) {
+                return in * 4.5f;
+            } else if (in < 1.0f) {
+                return 1.09929682680944f * powf(in, 0.45f) - 0.09929682680944f;
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED:
+        case AVIF_TRANSFER_CHARACTERISTICS_UNKNOWN:
+        case AVIF_TRANSFER_CHARACTERISTICS_SRGB: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 0.0030412825601275209f) {
+                return in * 12.92f;
+            } else if (in < 1.0f) {
+                return 1.0550107189475866f * powf(in, 1.0f / 2.4f) - 0.0550107189475866f;
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT470M:
+            return powf(AVIF_CLAMP(in, 0.0f, 1.0f), 2.2f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT470BG:
+            return powf(AVIF_CLAMP(in, 0.0f, 1.0f), 2.8f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE240: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in < 0.022821585529445f) {
+                return in * 4.0f;
+            } else if (in < 1.0f) {
+                return 1.111572195921731f * powf(in, 0.45f) - 0.111572195921731f;
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LINEAR:
+            return AVIF_CLAMP(in, 0.0f, 1.0f);
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LOG100:
+            return in <= 0.0f ? 0.01f : powf(10.0f, 2.0f * (AVIF_MIN(in, 1.0f) - 1.0f));
+
+        case AVIF_TRANSFER_CHARACTERISTICS_LOG100_SQRT10:
+            return in <= 0.0f ? 0.00316227766f : powf(10.0f, 2.5f * (AVIF_MIN(in, 1.0f) - 1.0f));
+
+        case AVIF_TRANSFER_CHARACTERISTICS_IEC61966: {
+            if (in < -0.018053968510807f) {
+                return -1.09929682680944f * powf(-in, 0.45f) + 0.09929682680944f;
+            } else if (in < 0.018053968510807f) {
+                return in * 4.5f;
+            } else {
+                return 1.09929682680944f * powf(in, 0.45f) - 0.09929682680944f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_BT1361: {
+            if (in < -0.25f) {
+                return -0.25f;
+            } else if (in < 0.0f) {
+                return -0.27482420670236f * powf(-4.0f * in, 0.45f) + 0.02482420670236f;
+            } else if (in < 0.018053968510807f) {
+                return in * 4.5f;
+            } else if (in < 1.0f) {
+                return 1.09929682680944f * powf(in, 0.45f) - 0.09929682680944f;
+            } else {
+                return 1.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084: {
+            if (in > 0.0f) {
+                float powin = powf(avifPQOOTF(in), 0.1593017578125f);
+                float num = 0.1640625f * powin - 0.1640625f;
+                float den = 1.0f + 18.6875f * powin;
+                return powf(1.0f + num / den, 78.84375f);
+            } else {
+                return 0.0f;
+            }
+        }
+
+        case AVIF_TRANSFER_CHARACTERISTICS_SMPTE428:
+            return powf(AVIF_MAX(in, 0.0f), 2.6f) / 0.91655527974030934f;
+
+        case AVIF_TRANSFER_CHARACTERISTICS_HLG: {
+            if (in < 0.0f) {
+                return 0.0f;
+            } else if (in <= (1.0f / 12.0f)) {
+                return sqrtf(3.0f * in);
+            } else {
+                return 0.17883277f * logf(12.0f * in - 0.28466892f) + 0.55991073f;
+            }
+        }
+    }
+
+    // Shouldn't reach here
+    return 0.0f;
 }

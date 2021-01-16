@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define MAX_DRIFT 5
 
@@ -74,6 +75,8 @@ int main(int argc, char * argv[])
                 mode = 2;
             } else if (!strcmp(arg, "premultiply")) {
                 mode = 3;
+            } else if (!strcmp(arg, "transfer")) {
+                mode = 4;
             } else {
                 mode = atoi(arg);
             }
@@ -114,6 +117,8 @@ int main(int argc, char * argv[])
             { AVIF_COLOR_PRIMARIES_BT709, AVIF_TRANSFER_CHARACTERISTICS_SRGB, AVIF_MATRIX_COEFFICIENTS_YCGCO },
             { AVIF_COLOR_PRIMARIES_BT709, AVIF_TRANSFER_CHARACTERISTICS_SRGB, AVIF_MATRIX_COEFFICIENTS_SMPTE2085 },
             { AVIF_COLOR_PRIMARIES_SMPTE432, AVIF_TRANSFER_CHARACTERISTICS_SRGB, AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL },
+            { AVIF_COLOR_PRIMARIES_BT2020, AVIF_TRANSFER_CHARACTERISTICS_BT2020_10BIT, AVIF_MATRIX_COEFFICIENTS_BT2020_CL },
+            { AVIF_COLOR_PRIMARIES_SMPTE432, AVIF_TRANSFER_CHARACTERISTICS_SMPTE240, AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_CL }
         };
         const int cicpCount = (int)(sizeof(cicpList) / sizeof(cicpList[0]));
 
@@ -516,6 +521,53 @@ int main(int argc, char * argv[])
                            totalPixelCount,
                            (double)driftPixelCounts[i] * 100.0 / (double)totalPixelCount);
                 }
+            }
+        }
+    } else if (mode == 4) {
+        // linear representation conversion roundtrip test
+        uint32_t depths[4] = { 8, 10, 12, 16 };
+        for (int depthIndex = 0; depthIndex < 4; ++depthIndex) {
+            uint32_t depth = depths[depthIndex];
+            const int colorMax = (1 << depth) - 1;
+            const float colorMaxF = (float)colorMax;
+
+            const avifTransferCharacteristics transferCharasList[] = {
+                AVIF_TRANSFER_CHARACTERISTICS_BT709,     AVIF_TRANSFER_CHARACTERISTICS_SRGB,
+                AVIF_TRANSFER_CHARACTERISTICS_BT470M,    AVIF_TRANSFER_CHARACTERISTICS_BT470BG,
+                AVIF_TRANSFER_CHARACTERISTICS_SMPTE240,  AVIF_TRANSFER_CHARACTERISTICS_LINEAR,
+                AVIF_TRANSFER_CHARACTERISTICS_IEC61966,  AVIF_TRANSFER_CHARACTERISTICS_BT1361,
+                AVIF_TRANSFER_CHARACTERISTICS_LOG100,    AVIF_TRANSFER_CHARACTERISTICS_LOG100_SQRT10,
+                AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084, AVIF_TRANSFER_CHARACTERISTICS_SMPTE428,
+                AVIF_TRANSFER_CHARACTERISTICS_HLG
+            };
+
+            const int transferCharasCount = (int)(sizeof(transferCharasList) / sizeof(transferCharasList[0]));
+
+            for (int transferCharasIndex = 0; transferCharasIndex < transferCharasCount; ++transferCharasIndex) {
+                avifTransferCharacteristics transferCharas = transferCharasList[transferCharasIndex];
+
+                for (int i = 0; i <= colorMax; ++i) {
+                    float colorF = (float)i / colorMaxF;
+                    // the two log TCs are known to clip small input
+                    if ((transferCharas == AVIF_TRANSFER_CHARACTERISTICS_LOG100 && colorF < 0.01f) ||
+                        (transferCharas == AVIF_TRANSFER_CHARACTERISTICS_LOG100_SQRT10 && colorF < 0.00316227766f)) {
+                        continue;
+                    }
+                    float linearColorF = avifTransferCharacteristicsToLinear(transferCharas, colorF);
+                    float resultColorF = avifTransferCharacteristicsFromLinear(transferCharas, linearColorF);
+                    int resultColor = (int)(resultColorF * colorMaxF);
+                    if (resultColor != i) {
+                        printf("ERROR: Encountered color mismatch on color transfer roundtrip: "
+                               "transferCharacteristics: %d, depth: %d, expect: %d, got: %d\n",
+                               transferCharas,
+                               depth,
+                               i,
+                               resultColor);
+                        return 1;
+                    }
+                }
+
+                printf("transferCharacteristics: %2d, depth: %2d Passed.\n", transferCharas, depth);
             }
         }
     }
