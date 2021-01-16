@@ -516,7 +516,8 @@ typedef enum avifReformatMode
     AVIF_REFORMAT_MODE_IDENTITY,             // Pack GBR directly into YUV planes (AVIF_MATRIX_COEFFICIENTS_IDENTITY)
     AVIF_REFORMAT_MODE_YCGCO,                // YUV conversion using AVIF_MATRIX_COEFFICIENTS_YCGCO
     AVIF_REFORMAT_MODE_SMPTE2085,            // YUV conversion using AVIF_MATRIX_COEFFICIENTS_SMPTE2085
-    AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE    // Constant Luminance YUV conversion using coefficients
+    AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE,   // Constant Luminance YUV conversion using coefficients
+    AVIF_REFORMAT_MODE_ICTCP                 // YUV conversion using AVIF_MATRIX_COEFFICIENTS_ICTCP
 } avifReformatMode;
 
 typedef struct avifReformatState

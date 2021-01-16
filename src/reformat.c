@@ -57,8 +57,10 @@ avifBool avifPrepareReformatState(const avifImage * image, const avifRGBImage * 
             state->mode = AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE;
             break;
 
-        // These matrix coefficients values are currently unsupported. Revise this list as more support is added.
         case AVIF_MATRIX_COEFFICIENTS_ICTCP:
+            state->mode = AVIF_REFORMAT_MODE_ICTCP;
+            break;
+
         // CICP reserved
         case 3:
         // catching "future" CICP values
@@ -146,6 +148,7 @@ avifBool avifPrepareReformatState(const avifImage * image, const avifRGBImage * 
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
         case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
+        case AVIF_REFORMAT_MODE_ICTCP:
             for (uint32_t cp = 0; cp < cpCount; ++cp) {
                 state->unormFloatTableY[cp] = ((float)cp - state->biasY) / state->rangeY;
                 state->unormFloatTableUV[cp] = ((float)cp - state->biasUV) / state->rangeUV;
@@ -180,6 +183,7 @@ static int avifReformatStateYToUNorm(avifReformatState * state, float v)
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
         case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
+        case AVIF_REFORMAT_MODE_ICTCP:
             unorm = (int)avifRoundf(v * state->rangeY + state->biasY);
             break;
 
@@ -200,6 +204,7 @@ static int avifReformatStateUVToUNorm(avifReformatState * state, float v)
         case AVIF_REFORMAT_MODE_YUV_COEFFICIENTS:
         case AVIF_REFORMAT_MODE_SMPTE2085:
         case AVIF_REFORMAT_MODE_CONSTANT_LUMINANCE:
+        case AVIF_REFORMAT_MODE_ICTCP:
             unorm = (int)avifRoundf(v * state->rangeUV + state->biasUV);
             break;
 
@@ -371,6 +376,33 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
                             yuvBlock[bI][bJ].y = Y;
                             yuvBlock[bI][bJ].u = Cb / (2 * (Cb > 0 ? state.pB : state.nB));
                             yuvBlock[bI][bJ].v = Cr / (2 * (Cr > 0 ? state.pR : state.nR));
+                            break;
+                        }
+
+                        case AVIF_REFORMAT_MODE_ICTCP: {
+                            // Formulas 14,15,16,17,18,19 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                            float RL = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[0]);
+                            float GL = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[1]);
+                            float BL = avifTransferCharacteristicsToLinear(image->transferCharacteristics, rgbPixel[2]);
+                            float L = avifTransferCharacteristicsFromLinear(image->transferCharacteristics,
+                                                                            (1688 * RL + 2146 * GL + 262 * BL) / 4096);
+                            float M = avifTransferCharacteristicsFromLinear(image->transferCharacteristics,
+                                                                            (683 * RL + 2951 * GL + 462 * BL) / 4096);
+                            float S = avifTransferCharacteristicsFromLinear(image->transferCharacteristics,
+                                                                            (99 * RL + 309 * GL + 3688 * BL) / 4096);
+
+                            // Formulas 72 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                            yuvBlock[bI][bJ].y = (L + M) / 2; // I
+                            if (image->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_HLG) {
+                                // BT.2100 gives another set of coefficients for HLG
+                                // TABLE 7 from https://www.itu.int/rec/R-REC-BT.2100-2-201807-I/en
+                                yuvBlock[bI][bJ].u = (3625 * L - 7465 * M + 3840 * S) / 4096; // Ct
+                                yuvBlock[bI][bJ].v = (9500 * L - 9212 * M - 288 * S) / 4096;  // Cp
+                            } else {
+                                // Formulas 73,74 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                                yuvBlock[bI][bJ].u = (6610 * L - 13613 * M + 7003 * S) / 4096; // Ct
+                                yuvBlock[bI][bJ].v = (17933 * L - 17390 * M - 543 * S) / 4096; // Cp
+                            }
                             break;
                         }
                     }
@@ -722,6 +754,35 @@ static avifResult avifImageYUVAnyToRGBAnySlow(const avifImage * image,
                         G = avifTransferCharacteristicsFromLinear(image->transferCharacteristics,
                                                                   (YC - state->kr * RC - state->kb * BC) / state->kg);
                         break;
+                    }
+
+                    case AVIF_REFORMAT_MODE_ICTCP: {
+                        // ICtCp
+                        float L, M, S;
+                        if (image->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_HLG) {
+                            // TABLE 7 from https://www.itu.int/rec/R-REC-BT.2100-2-201807-I/en
+                            L = Y + 0.0157185801087304125f * Cb + 0.209581068116405500f * Cr;
+                            M = Y - 0.0157185801087304125f * Cb - 0.209581068116405500f * Cr;
+                            S = Y + 1.02127107984223430f * Cb - 0.605274490992431510f * Cr;
+                        } else {
+                            // Formulas 72,73,74 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                            L = Y + 0.00860903703793275659f * Cb + 0.111029625003025957f * Cr;
+                            M = Y - 0.00860903703793275659f * Cb - 0.111029625003025957f * Cr;
+                            S = Y + 0.560031335710679118f * Cb - 0.320627174987318852f * Cr;
+                        }
+
+                        // Formulas 14,15,16,17,18,19 from https://www.itu.int/rec/T-REC-H.273-201612-I/en
+                        float LL = avifTransferCharacteristicsToLinear(image->transferCharacteristics, L);
+                        float ML = avifTransferCharacteristicsToLinear(image->transferCharacteristics, M);
+                        float SL = avifTransferCharacteristicsToLinear(image->transferCharacteristics, S);
+
+                        float RL = 3.43660669433307843f * LL - 2.50645211865626990f * ML + 0.0698454243231914710f * SL;
+                        float GL = -0.791329555598928753f * LL + 1.98360045179229073f * ML - 0.192270896193361981f * SL;
+                        float BL = -0.0259498996905926734f * LL - 0.0989137147117264417f * ML + 1.12486361440231912f * SL;
+
+                        R = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, RL);
+                        G = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, GL);
+                        B = avifTransferCharacteristicsFromLinear(image->transferCharacteristics, BL);
                     }
                 }
             } else {

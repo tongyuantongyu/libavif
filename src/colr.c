@@ -91,7 +91,7 @@ static const struct avifMatrixCoefficientsTable matrixCoefficientsTables[] = {
     //{ AVIF_MATRIX_COEFFICIENTS_SMPTE2085, "ST 2085", 0.0f, 0.0f }, // Handled elsewhere
     //{ AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_NCL, "Chromaticity-derived non-constant luminance system", 0.0f, 0.0f } // Handled elsewhere
     //{ AVIF_MATRIX_COEFFICIENTS_CHROMA_DERIVED_CL, "Chromaticity-derived constant luminance system", 0.0f, 0.0f } // Handled elsewhere
-    //{ AVIF_MATRIX_COEFFICIENTS_ICTCP, "BT.2100-0 ICtCp", 0.0f, 0.0f }, // FIXME: This can't represent using Kr and Kb.
+    //{ AVIF_MATRIX_COEFFICIENTS_ICTCP, "BT.2100-0 ICtCp", 0.0f, 0.0f }, // Handled elsewhere
 };
 
 static const int avifMatrixCoefficientsTableSize = sizeof(matrixCoefficientsTables) / sizeof(matrixCoefficientsTables[0]);
