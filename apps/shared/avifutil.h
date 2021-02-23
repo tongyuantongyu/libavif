@@ -41,7 +41,9 @@ typedef enum avifAppFileFormat
     AVIF_APP_FILE_FORMAT_AVIF,
     AVIF_APP_FILE_FORMAT_JPEG,
     AVIF_APP_FILE_FORMAT_PNG,
-    AVIF_APP_FILE_FORMAT_Y4M
+    AVIF_APP_FILE_FORMAT_Y4M,
+
+    AVIF_APP_FILE_FORMAT_ANY = 1000 // an arbitrary format for decoders that support many formats
 } avifAppFileFormat;
 
 avifAppFileFormat avifGuessFileFormat(const char * filename);
@@ -56,14 +58,29 @@ typedef struct avifAppSourceTiming
     uint64_t timescale; // timescale of the media (Hz)
 } avifAppSourceTiming;
 
+// This structure holds options for reading images.
+typedef struct avifAppReadOptions
+{
+    avifPixelFormat requestedFormat;
+    uint32_t requestedDepth;
+    avifBool useSharpYUV;
+} avifAppReadOptions;
+
+// This structure holds options for writing images.
+typedef struct avifAppWriteOptions
+{
+    uint32_t requestedDepth;
+    avifChromaUpsampling chromaUpsampling;
+    int compressionLevel;
+    int quality;
+} avifAppWriteOptions;
+
 struct y4mFrameIterator;
 // Reads an image from a file with the requested format and depth.
 // In case of a y4m file, sourceTiming and frameIter can be set.
 // Returns AVIF_APP_FILE_FORMAT_UNKNOWN in case of error.
 avifAppFileFormat avifReadImage(const char * filename,
-                                avifPixelFormat requestedFormat,
-                                int requestedDepth,
-                                avifBool useSharpYUV,
+                                avifAppReadOptions options,
                                 avifImage * image,
                                 uint32_t * outDepth,
                                 avifAppSourceTiming * sourceTiming,

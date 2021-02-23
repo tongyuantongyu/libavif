@@ -9,6 +9,7 @@
 
 #include "avifjpeg.h"
 #include "avifpng.h"
+#include "avifwic.h"
 #include "y4m.h"
 
 static int32_t calcGCD(int32_t a, int32_t b)
@@ -225,9 +226,7 @@ avifAppFileFormat avifGuessFileFormat(const char * filename)
 }
 
 avifAppFileFormat avifReadImage(const char * filename,
-                                avifPixelFormat requestedFormat,
-                                int requestedDepth,
-                                avifBool useSharpYUV,
+                                avifAppReadOptions options,
                                 avifImage * image,
                                 uint32_t * outDepth,
                                 avifAppSourceTiming * sourceTiming,
@@ -242,16 +241,18 @@ avifAppFileFormat avifReadImage(const char * filename,
             *outDepth = image->depth;
         }
     } else if (format == AVIF_APP_FILE_FORMAT_JPEG) {
-        if (!avifJPEGRead(filename, image, requestedFormat, requestedDepth, useSharpYUV)) {
+        if (!avifJPEGRead(filename, image, options)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
         if (outDepth) {
             *outDepth = 8;
         }
     } else if (format == AVIF_APP_FILE_FORMAT_PNG) {
-        if (!avifPNGRead(filename, image, requestedFormat, requestedDepth, outDepth, useSharpYUV)) {
+        if (!avifPNGRead(filename, image, options, outDepth)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
+    } else if (avifWICRead(filename, image, options, outDepth)) {
+        return AVIF_APP_FILE_FORMAT_ANY;
     } else {
         fprintf(stderr, "Unrecognized file format: %s\n", filename);
         return AVIF_APP_FILE_FORMAT_UNKNOWN;

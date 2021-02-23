@@ -31,7 +31,7 @@ typedef png_charp png_iccp_datap;
 // modified between setjmp and longjmp. But GCC's -Wclobbered warning may have
 // trouble figuring that out, so we preemptively declare them as volatile.
 
-avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifPixelFormat requestedFormat, uint32_t requestedDepth, uint32_t * outPNGDepth, avifBool useSharpYUV)
+avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifAppReadOptions options, uint32_t * outPNGDepth)
 {
     volatile avifBool readResult = AVIF_FALSE;
     png_structp png = NULL;
@@ -125,13 +125,13 @@ avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifPixelForm
 
     avif->width = rawWidth;
     avif->height = rawHeight;
-    avif->yuvFormat = requestedFormat;
+    avif->yuvFormat = options.requestedFormat;
     if (avif->yuvFormat == AVIF_PIXEL_FORMAT_NONE) {
         // Identity is only valid with YUV444.
         avif->yuvFormat = (avif->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ? AVIF_PIXEL_FORMAT_YUV444
                                                                                           : AVIF_APP_DEFAULT_PIXEL_FORMAT;
     }
-    avif->depth = requestedDepth;
+    avif->depth = options.requestedDepth;
     if (avif->depth == 0) {
         if (imgBitDepth == 8) {
             avif->depth = 8;
@@ -142,7 +142,7 @@ avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifPixelForm
 
     avifRGBImageSetDefaults(&rgb, avif);
     rgb.depth = imgBitDepth;
-    rgb.useSharpYUVConversion = useSharpYUV;
+    rgb.useSharpYUVConversion = options.useSharpYUV;
     avifRGBImageAllocatePixels(&rgb);
     rowPointers = (png_bytep *)malloc(sizeof(png_bytep) * rgb.height);
     for (uint32_t y = 0; y < rgb.height; ++y) {
@@ -169,7 +169,7 @@ cleanup:
     return readResult;
 }
 
-avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint32_t requestedDepth, avifChromaUpsampling chromaUpsampling, int compressionLevel)
+avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, avifAppWriteOptions options)
 {
     volatile avifBool writeResult = AVIF_FALSE;
     png_structp png = NULL;
@@ -180,7 +180,7 @@ avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint3
     avifRGBImage rgb;
     memset(&rgb, 0, sizeof(avifRGBImage));
 
-    int rgbDepth = requestedDepth;
+    uint32_t rgbDepth = options.requestedDepth;
     if (rgbDepth == 0) {
         if (avif->depth > 8) {
             rgbDepth = 16;
@@ -191,7 +191,7 @@ avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint3
 
     avifRGBImageSetDefaults(&rgb, avif);
     rgb.depth = rgbDepth;
-    rgb.chromaUpsampling = chromaUpsampling;
+    rgb.chromaUpsampling = options.chromaUpsampling;
     avifRGBImageAllocatePixels(&rgb);
     if (avifImageYUVToRGB(avif, &rgb) != AVIF_RESULT_OK) {
         fprintf(stderr, "Conversion to RGB failed: %s\n", outputFilename);
@@ -228,8 +228,8 @@ avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint3
     png_set_option(png, PNG_SKIP_sRGB_CHECK_PROFILE, PNG_OPTION_ON);
 #endif
 
-    if (compressionLevel >= 0) {
-        png_set_compression_level(png, compressionLevel);
+    if (options.compressionLevel >= 0) {
+        png_set_compression_level(png, options.compressionLevel);
     }
 
     png_set_IHDR(png, info, avif->width, avif->height, rgb.depth, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);

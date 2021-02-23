@@ -240,7 +240,7 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
 // longjmp. But GCC's -Wclobbered warning may have trouble figuring that out, so
 // we preemptively declare it as volatile.
 
-avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFormat requestedFormat, uint32_t requestedDepth, avifBool useSharpYUV)
+avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifAppReadOptions options)
 {
     volatile avifBool ret = AVIF_FALSE;
     uint8_t * volatile iccData = NULL;
@@ -275,8 +275,8 @@ avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFor
         avifImageSetProfileICC(avif, iccDataTmp, (size_t)iccDataLen);
     }
 
-    avif->yuvFormat = requestedFormat; // This may be AVIF_PIXEL_FORMAT_NONE, which is "auto" to avifJPEGReadCopy()
-    avif->depth = requestedDepth ? requestedDepth : 8;
+    avif->yuvFormat = options.requestedFormat; // This may be AVIF_PIXEL_FORMAT_NONE, which is "auto" to avifJPEGReadCopy()
+    avif->depth = options.requestedDepth ? options.requestedDepth : 8;
     // JPEG doesn't have alpha. Prevent confusion.
     avif->alphaPremultiplied = AVIF_FALSE;
 
@@ -302,11 +302,11 @@ avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFor
             avif->yuvFormat = (avif->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ? AVIF_PIXEL_FORMAT_YUV444
                                                                                               : AVIF_APP_DEFAULT_PIXEL_FORMAT;
         }
-        avif->depth = requestedDepth ? requestedDepth : 8;
+        avif->depth = options.requestedDepth ? options.requestedDepth : 8;
         avifRGBImageSetDefaults(&rgb, avif);
         rgb.format = AVIF_RGB_FORMAT_RGB;
         rgb.depth = 8;
-        rgb.useSharpYUVConversion = useSharpYUV;
+        rgb.useSharpYUVConversion = options.useSharpYUV;
         avifRGBImageAllocatePixels(&rgb);
 
         int row = 0;
@@ -334,7 +334,7 @@ cleanup:
     return ret;
 }
 
-avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int jpegQuality, avifChromaUpsampling chromaUpsampling)
+avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, avifAppWriteOptions options)
 {
     avifBool ret = AVIF_FALSE;
     FILE * f = NULL;
@@ -348,7 +348,7 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     avifRGBImage rgb;
     avifRGBImageSetDefaults(&rgb, avif);
     rgb.format = AVIF_RGB_FORMAT_RGB;
-    rgb.chromaUpsampling = chromaUpsampling;
+    rgb.chromaUpsampling = options.chromaUpsampling;
     rgb.depth = 8;
     avifRGBImageAllocatePixels(&rgb);
     if (avifImageYUVToRGB(avif, &rgb) != AVIF_RESULT_OK) {
@@ -368,7 +368,7 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     cinfo.input_components = 3;
     cinfo.in_color_space = JCS_RGB;
     jpeg_set_defaults(&cinfo);
-    jpeg_set_quality(&cinfo, jpegQuality, TRUE);
+    jpeg_set_quality(&cinfo, options.quality, TRUE);
     jpeg_start_compress(&cinfo, TRUE);
 
     if (avif->icc.data && (avif->icc.size > 0)) {

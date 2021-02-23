@@ -23,13 +23,15 @@ int main(int argc, char** argv) {
     return 2;
   }
   uint32_t depth[2];
+
+  avifAppReadOptions options {};
   // Request the bit depth closest to the bit depth of the input file.
-  constexpr int kRequestedDepth = 0;
-  constexpr avifPixelFormat requestedFormat = AVIF_PIXEL_FORMAT_NONE;
+  options.requestedDepth = 0;
+  options.requestedFormat = AVIF_PIXEL_FORMAT_NONE;
   for (int i : {0, 1}) {
     // Make sure no color conversion happens.
     decoded[i]->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_IDENTITY;
-    if (avifReadImage(argv[i + 1], requestedFormat, kRequestedDepth,
+    if (avifReadImage(argv[i + 1], options,
                       decoded[i].get(), &depth[i], nullptr,
                       nullptr) == AVIF_APP_FILE_FORMAT_UNKNOWN) {
       std::cerr << "Image " << argv[i + 1] << " cannot be read." << std::endl;

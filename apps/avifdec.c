@@ -296,6 +296,8 @@ int main(int argc, char * argv[])
         avifImageSetProfileICC(decoder->image, NULL, 0);
     }
 
+    avifAppWriteOptions options;
+    options.chromaUpsampling = chromaUpsampling;
     avifAppFileFormat outputFormat = avifGuessFileFormat(outputFilename);
     if (outputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
         fprintf(stderr, "Cannot determine output file extension: %s\n", outputFilename);
@@ -309,11 +311,15 @@ int main(int argc, char * argv[])
         if (rawColor) {
             decoder->image->alphaPremultiplied = AVIF_TRUE;
         }
-        if (!avifJPEGWrite(outputFilename, decoder->image, jpegQuality, chromaUpsampling)) {
+
+        options.quality = jpegQuality;
+        if (!avifJPEGWrite(outputFilename, decoder->image, options)) {
             returnCode = 1;
         }
     } else if (outputFormat == AVIF_APP_FILE_FORMAT_PNG) {
-        if (!avifPNGWrite(outputFilename, decoder->image, requestedDepth, chromaUpsampling, pngCompressionLevel)) {
+        options.requestedDepth = requestedDepth;
+        options.compressionLevel = pngCompressionLevel;
+        if (!avifPNGWrite(outputFilename, decoder->image, options)) {
             returnCode = 1;
         }
     } else {

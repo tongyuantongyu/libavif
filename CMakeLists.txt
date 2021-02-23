@@ -450,34 +450,50 @@ if(AVIF_BUILD_APPS OR (AVIF_BUILD_TESTS AND AVIF_ENABLE_GTEST))
     find_package(PNG REQUIRED)
     find_package(JPEG REQUIRED)
 
+    set(AVIF_APP_LIBRARIES ${AVIF_PLATFORM_LIBRARIES} ${PNG_LIBRARY} ${ZLIB_LIBRARY} ${JPEG_LIBRARY})
+    set(AVIF_APP_DEFINITIONS "")
+
+    if(WIN32)
+        include(CheckIncludeFiles)
+        check_include_files("windows.h;wincodec.h" AVIF_HAVE_WINCODEC)
+        if(AVIF_HAVE_WINCODEC)
+            message(STATUS "libavif: wincodec found, reading from wincodec enabled.")
+            set(AVIF_APP_DEFINITIONS ${AVIF_APP_DEFINITIONS} -DAVIF_WINCODEC_ENABLED=1)
+            set(AVIF_APP_LIBRARIES ${AVIF_APP_LIBRARIES} windowscodecs)
+        else()
+            message(STATUS "libavif: wincodec not found, reading from wincodec disabled.")
+        endif()
+    endif()
+
     add_library(
-        avif_apps OBJECT apps/shared/avifjpeg.c apps/shared/iccjpeg.c apps/shared/avifpng.c apps/shared/avifutil.c
-                         apps/shared/y4m.c
+            avif_apps OBJECT apps/shared/avifjpeg.c apps/shared/iccjpeg.c apps/shared/avifpng.c apps/shared/avifutil.c
+                         apps/shared/y4m.c apps/shared/avifwic.c
     )
-    target_link_libraries(avif_apps avif ${AVIF_PLATFORM_LIBRARIES} ${PNG_LIBRARY} ${ZLIB_LIBRARY} ${JPEG_LIBRARY})
+    target_link_libraries(avif_apps avif ${AVIF_APP_LIBRARIES})
     target_include_directories(avif_apps PRIVATE ${PNG_PNG_INCLUDE_DIR} ${JPEG_INCLUDE_DIR} INTERFACE apps/shared)
+    target_compile_definitions(avif_apps PRIVATE ${AVIF_APP_DEFINITIONS})
 endif()
 
 if(AVIF_BUILD_APPS)
-    add_executable(avifenc apps/avifenc.c)
-    if(AVIF_LOCAL_LIBGAV1 OR AVIF_CODEC_LIBRARIES MATCHES vmaf)
-        set_target_properties(avifenc PROPERTIES LINKER_LANGUAGE "CXX")
-    endif()
-    target_link_libraries(avifenc avif_apps)
-    add_executable(avifdec apps/avifdec.c)
-    if(AVIF_LOCAL_LIBGAV1 OR AVIF_CODEC_LIBRARIES MATCHES vmaf)
-        set_target_properties(avifdec PROPERTIES LINKER_LANGUAGE "CXX")
-    endif()
-    target_link_libraries(avifdec avif_apps)
+   add_executable(avifenc apps/avifenc.c)
+   if(AVIF_LOCAL_LIBGAV1 OR AVIF_CODEC_LIBRARIES MATCHES vmaf)
+   set_target_properties(avifenc PROPERTIES LINKER_LANGUAGE "CXX")
+   endif()
+   target_link_libraries(avifenc avif_apps)
+   add_executable(avifdec apps/avifdec.c)
+   if(AVIF_LOCAL_LIBGAV1 OR AVIF_CODEC_LIBRARIES MATCHES vmaf)
+   set_target_properties(avifdec PROPERTIES LINKER_LANGUAGE "CXX")
+   endif()
+   target_link_libraries(avifdec avif_apps)
 
-    if(NOT SKIP_INSTALL_APPS AND NOT SKIP_INSTALL_ALL)
-        install(
-            TARGETS avifenc avifdec
-            RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-            ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-        )
-    endif()
+   if(NOT SKIP_INSTALL_APPS AND NOT SKIP_INSTALL_ALL)
+   install(
+   TARGETS avifenc avifdec
+   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+   )
+   endif()
 endif()
 
 if(AVIF_BUILD_TESTS)

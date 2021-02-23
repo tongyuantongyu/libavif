@@ -6,6 +6,7 @@
 #include "avifjpeg.h"
 #include "avifpng.h"
 #include "avifutil.h"
+#include "avifwic.h"
 #include "y4m.h"
 
 #include <assert.h>
@@ -280,14 +281,13 @@ static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image
         return AVIF_APP_FILE_FORMAT_UNKNOWN;
     }
 
-    const avifAppFileFormat nextInputFormat = avifReadImage(input->files[input->fileIndex].filename,
-                                                            input->requestedFormat,
-                                                            input->requestedDepth,
-                                                            input->useSharpYUV,
-                                                            image,
-                                                            outDepth,
-                                                            sourceTiming,
-                                                            &input->frameIter);
+    avifAppReadOptions options;
+    options.requestedFormat = input->requestedFormat;
+    options.requestedDepth = input->requestedDepth;
+    options.useSharpYUV = input->useSharpYUV;
+
+    const avifAppFileFormat nextInputFormat =
+        avifReadImage(input->files[input->fileIndex].filename, options, image, outDepth, sourceTiming, &input->frameIter);
     if (nextInputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
         return AVIF_APP_FILE_FORMAT_UNKNOWN;
     }

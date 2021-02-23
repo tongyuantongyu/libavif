@@ -4,14 +4,14 @@
 #ifndef LIBAVIF_APPS_SHARED_AVIFJPEG_H
 #define LIBAVIF_APPS_SHARED_AVIFJPEG_H
 
-#include "avif/avif.h"
+#include "avifutil.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFormat requestedFormat, uint32_t requestedDepth, avifBool useSharpYUV);
-avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int jpegQuality, avifChromaUpsampling chromaUpsampling);
+avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifAppReadOptions options);
+avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, avifAppWriteOptions options);
 
 #ifdef __cplusplus
 } // extern "C"
