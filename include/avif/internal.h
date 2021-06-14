@@ -66,31 +66,6 @@ void * avifArrayPushPtr(void * arrayStruct);
 void avifArrayPush(void * arrayStruct, void * element);
 void avifArrayDestroy(void * arrayStruct);
 
-typedef struct avifAlphaParams
-{
-    uint32_t width;
-    uint32_t height;
-
-    uint32_t srcDepth;
-    avifRange srcRange;
-    uint8_t * srcPlane;
-    uint32_t srcRowBytes;
-    uint32_t srcOffsetBytes;
-    uint32_t srcPixelBytes;
-
-    uint32_t dstDepth;
-    avifRange dstRange;
-    uint8_t * dstPlane;
-    uint32_t dstRowBytes;
-    uint32_t dstOffsetBytes;
-    uint32_t dstPixelBytes;
-
-} avifAlphaParams;
-
-avifBool avifCheckAlphaOpaque(const struct avifAlphaParams * const params);
-avifBool avifFillAlpha(const avifAlphaParams * const params);
-avifBool avifReformatAlpha(const avifAlphaParams * const params);
-
 typedef enum avifReformatMode
 {
     AVIF_REFORMAT_MODE_YUV_COEFFICIENTS = 0, // Normal YUV conversion using coefficients
@@ -166,6 +141,25 @@ avifResult avifRGBImageUnpremultiplyAlphaLibYUV(avifRGBImage * rgb);
 // * AVIF_RESULT_INVALID_ARGUMENT - Sharp YUV doesn't improve quality with the specific matrixCoefficient, use normal conversion
 // * [any other error]            - Return error to caller
 avifResult avifImageRGBtoYUVSharp(avifImage * image, const avifRGBImage * rgb, avifReformatState * state);
+
+typedef struct avifAlphaData
+{
+    uint32_t width;
+    uint32_t height;
+
+    uint32_t depth;
+    avifRange range;
+    uint8_t * plane;
+    uint32_t rowBytes;
+    uint32_t offsetBytes;
+    uint32_t pixelBytes;
+} avifAlphaData;
+
+void avifAlphaDataFromAvifImage(avifAlphaData * data, const avifImage * image);
+void avifAlphaDataFromAvifRGBImage(avifAlphaData * data, const avifRGBImage * rgb, const avifReformatState * state);
+avifBool avifCheckAlphaOpaque(const avifAlphaData * const src);
+avifBool avifFillAlpha(const avifAlphaData * const dst);
+avifBool avifReformatAlpha(const avifAlphaData * const src, const avifAlphaData * const dst);
 
 // ---------------------------------------------------------------------------
 // Scaling

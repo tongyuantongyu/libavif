@@ -15,52 +15,76 @@ static int calcMaxChannel(uint32_t depth, avifRange range)
     return maxChannel;
 }
 
-avifBool avifCheckAlphaOpaque(const avifAlphaParams * const params)
+void avifAlphaDataFromAvifImage(avifAlphaData * data, const avifImage * image)
 {
-    if (params->srcDepth > 8) {
-        const uint16_t maxChannel = (uint16_t)calcMaxChannel(params->srcDepth, params->srcRange);
-        for (uint32_t j = 0; j < params->height; ++j) {
-            uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-            for (uint32_t i = 0; i < params->width; ++i) {
+    data->width = image->width;
+    data->height = image->height;
+    data->depth = image->depth;
+    data->range = image->alphaRange;
+    data->plane = image->alphaPlane;
+    data->rowBytes = image->alphaRowBytes;
+    data->offsetBytes = 0;
+    data->pixelBytes = avifImageUsesU16(image) ? 2 : 1;
+}
+
+void avifAlphaDataFromAvifRGBImage(avifAlphaData * data, const avifRGBImage * rgb, const avifReformatState * state)
+{
+    data->width = rgb->width;
+    data->height = rgb->height;
+    data->depth = rgb->depth;
+    data->range = AVIF_RANGE_FULL;
+    data->plane = rgb->pixels;
+    data->rowBytes = rgb->rowBytes;
+    data->offsetBytes = state->rgbOffsetBytesA;
+    data->pixelBytes = state->rgbPixelBytes;
+}
+
+avifBool avifCheckAlphaOpaque(const avifAlphaData * const src)
+{
+    if (src->depth > 8) {
+        const uint16_t maxChannel = (1 << src->depth) - 1;
+        for (uint32_t j = 0; j < src->height; ++j) {
+            uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+            for (uint32_t i = 0; i < src->width; ++i) {
                 if (*((uint16_t *)srcRow) != maxChannel) {
                     return AVIF_FALSE;
                 }
-                srcRow += params->srcPixelBytes;
+                srcRow += src->pixelBytes;
             }
         }
     } else {
-        const uint8_t maxChannel = (uint8_t)calcMaxChannel(params->srcDepth, params->srcRange);
-        for (uint32_t j = 0; j < params->height; ++j) {
-            uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-            for (uint32_t i = 0; i < params->width; ++i) {
+        const uint8_t maxChannel = (1 << src->depth) - 1;
+        for (uint32_t j = 0; j < src->height; ++j) {
+            uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+            for (uint32_t i = 0; i < src->width; ++i) {
                 if (*srcRow != maxChannel) {
                     return AVIF_FALSE;
                 }
-                srcRow += params->srcPixelBytes;
+                srcRow += src->pixelBytes;
             }
         }
     }
     return AVIF_TRUE;
 }
 
-avifBool avifFillAlpha(const avifAlphaParams * const params)
+avifBool avifFillAlpha(const avifAlphaData * const dst)
 {
-    if (params->dstDepth > 8) {
-        const uint16_t maxChannel = (uint16_t)calcMaxChannel(params->dstDepth, params->dstRange);
-        for (uint32_t j = 0; j < params->height; ++j) {
-            uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-            for (uint32_t i = 0; i < params->width; ++i) {
+    if (dst->depth > 8) {
+        const uint16_t maxChannel = (uint16_t)calcMaxChannel(dst->depth, dst->range);
+        for (uint32_t j = 0; j < dst->height; ++j) {
+            uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+            for (uint32_t i = 0; i < dst->width; ++i) {
                 *((uint16_t *)dstRow) = maxChannel;
-                dstRow += params->dstPixelBytes;
+                dstRow += dst->pixelBytes;
             }
         }
     } else {
-        const uint8_t maxChannel = (uint8_t)calcMaxChannel(params->dstDepth, params->dstRange);
-        for (uint32_t j = 0; j < params->height; ++j) {
-            uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-            for (uint32_t i = 0; i < params->width; ++i) {
+        const uint8_t maxChannel = (uint8_t)calcMaxChannel(dst->depth, dst->range);
+        for (uint32_t j = 0; j < dst->height; ++j) {
+            uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+            for (uint32_t i = 0; i < dst->width; ++i) {
                 *dstRow = maxChannel;
-                dstRow += params->dstPixelBytes;
+                dstRow += dst->pixelBytes;
             }
         }
     }
@@ -69,117 +93,121 @@ avifBool avifFillAlpha(const avifAlphaParams * const params)
 
 // Note: The [limited -> limited] paths are here for completeness, but in practice those
 //       paths will never be used, as avifRGBImage is always full range.
-avifBool avifReformatAlpha(const avifAlphaParams * const params)
+avifBool avifReformatAlpha(const avifAlphaData * const src, const avifAlphaData * const dst)
 {
-    const int srcMaxChannel = (1 << params->srcDepth) - 1;
-    const int dstMaxChannel = (1 << params->dstDepth) - 1;
+    if (src->width != dst->width || src->height != dst->height) {
+        return AVIF_FALSE;
+    }
+    
+    const int srcMaxChannel = (1 << src->depth) - 1;
+    const int dstMaxChannel = (1 << dst->depth) - 1;
     const float srcMaxChannelF = (float)srcMaxChannel;
     const float dstMaxChannelF = (float)dstMaxChannel;
 
-    if (params->srcDepth == params->dstDepth) {
+    if (src->depth == dst->depth) {
         // no depth rescale
 
-        if ((params->srcRange == AVIF_RANGE_FULL) && (params->dstRange == AVIF_RANGE_FULL)) {
+        if ((src->range == AVIF_RANGE_FULL) && (dst->range == AVIF_RANGE_FULL)) {
             // no depth rescale, no range conversion
 
-            if (params->srcDepth > 8) {
+            if (src->depth > 8) {
                 // no depth rescale, no range conversion, uint16_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                     }
                 }
             } else {
                 // no depth rescale, no range conversion, uint8_t -> uint8_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        dstRow[i * params->dstPixelBytes] = srcRow[i * params->srcPixelBytes];
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        dstRow[i * dst->pixelBytes] = srcRow[i * src->pixelBytes];
                     }
                 }
             }
-        } else if ((params->srcRange == AVIF_RANGE_LIMITED) && (params->dstRange == AVIF_RANGE_FULL)) {
+        } else if ((src->range == AVIF_RANGE_LIMITED) && (dst->range == AVIF_RANGE_FULL)) {
             // limited -> full
 
-            if (params->srcDepth > 8) {
+            if (src->depth > 8) {
                 // no depth rescale, limited -> full, uint16_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                        int dstAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                        int dstAlpha = avifLimitedToFullY(src->depth, srcAlpha);
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
             } else {
                 // no depth rescale, limited -> full, uint8_t -> uint8_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
-                        int dstAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
-                        dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
+                        int dstAlpha = avifLimitedToFullY(src->depth, srcAlpha);
+                        dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                     }
                 }
             }
-        } else if ((params->srcRange == AVIF_RANGE_FULL) && (params->dstRange == AVIF_RANGE_LIMITED)) {
+        } else if ((src->range == AVIF_RANGE_FULL) && (dst->range == AVIF_RANGE_LIMITED)) {
             // full -> limited
 
-            if (params->srcDepth > 8) {
+            if (src->depth > 8) {
                 // no depth rescale, full -> limited, uint16_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                        int dstAlpha = avifFullToLimitedY(params->dstDepth, srcAlpha);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                        int dstAlpha = avifFullToLimitedY(dst->depth, srcAlpha);
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
             } else {
                 // no depth rescale, full -> limited, uint8_t -> uint8_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
-                        int dstAlpha = avifFullToLimitedY(params->dstDepth, srcAlpha);
-                        dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
+                        int dstAlpha = avifFullToLimitedY(dst->depth, srcAlpha);
+                        dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                     }
                 }
             }
-        } else if ((params->srcRange == AVIF_RANGE_LIMITED) && (params->dstRange == AVIF_RANGE_LIMITED)) {
+        } else if ((src->range == AVIF_RANGE_LIMITED) && (dst->range == AVIF_RANGE_LIMITED)) {
             // limited -> limited
 
-            if (params->srcDepth > 8) {
+            if (src->depth > 8) {
                 // no depth rescale, limited -> limited, uint16_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                     }
                 }
             } else {
                 // no depth rescale, limited -> limited, uint8_t -> uint8_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        dstRow[i * params->dstPixelBytes] = srcRow[i * params->srcPixelBytes];
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        dstRow[i * dst->pixelBytes] = srcRow[i * src->pixelBytes];
                     }
                 }
             }
@@ -188,221 +216,221 @@ avifBool avifReformatAlpha(const avifAlphaParams * const params)
     } else {
         // depth rescale
 
-        if ((params->srcRange == AVIF_RANGE_FULL) && (params->dstRange == AVIF_RANGE_FULL)) {
+        if ((src->range == AVIF_RANGE_FULL) && (dst->range == AVIF_RANGE_FULL)) {
             // depth rescale, no range conversion
 
-            if (params->srcDepth > 8) {
-                if (params->dstDepth > 8) {
+            if (src->depth > 8) {
+                if (dst->depth > 8) {
                     // depth rescale, no range conversion, uint16_t -> uint16_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                            *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                         }
                     }
                 } else {
                     // depth rescale, no range conversion, uint16_t -> uint8_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                            dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                         }
                     }
                 }
             } else {
                 // depth rescale, no range conversion, uint8_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
                         float alphaF = (float)srcAlpha / srcMaxChannelF;
                         int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                         dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
 
-                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (params->srcDepth == params->dstDepth) block above.
-                // assert(params->dstDepth > 8);
+                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (src->depth == dst->depth) block above.
+                // assert(dst->depth > 8);
             }
-        } else if ((params->srcRange == AVIF_RANGE_LIMITED) && (params->dstRange == AVIF_RANGE_FULL)) {
+        } else if ((src->range == AVIF_RANGE_LIMITED) && (dst->range == AVIF_RANGE_FULL)) {
             // limited -> full
 
-            if (params->srcDepth > 8) {
-                if (params->dstDepth > 8) {
+            if (src->depth > 8) {
+                if (dst->depth > 8) {
                     // depth rescale, limited -> full, uint16_t -> uint16_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                            srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                            srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                            *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                         }
                     }
                 } else {
                     // depth rescale, limited -> full, uint16_t -> uint8_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                            srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                            srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                            dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                         }
                     }
                 }
             } else {
                 // depth rescale, limited -> full, uint8_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
-                        srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
+                        srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                         float alphaF = (float)srcAlpha / srcMaxChannelF;
                         int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                         dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
 
-                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (params->srcDepth == params->dstDepth) block above.
-                // assert(params->dstDepth > 8);
+                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (src->depth == dst->depth) block above.
+                // assert(dst->depth > 8);
             }
-        } else if ((params->srcRange == AVIF_RANGE_FULL) && (params->dstRange == AVIF_RANGE_LIMITED)) {
+        } else if ((src->range == AVIF_RANGE_FULL) && (dst->range == AVIF_RANGE_LIMITED)) {
             // full -> limited
 
-            if (params->srcDepth > 8) {
-                if (params->dstDepth > 8) {
+            if (src->depth > 8) {
+                if (dst->depth > 8) {
                     // depth rescale, full -> limited, uint16_t -> uint16_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                            *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                            dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                            *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                         }
                     }
                 } else {
                     // depth rescale, full -> limited, uint16_t -> uint8_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                            dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                            dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                            dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                         }
                     }
                 }
             } else {
                 // depth rescale, full -> limited, uint8_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
                         float alphaF = (float)srcAlpha / srcMaxChannelF;
                         int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                         dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                        dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                        dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
 
-                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (params->srcDepth == params->dstDepth) block above.
-                // assert(params->dstDepth > 8);
+                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (src->depth == dst->depth) block above.
+                // assert(dst->depth > 8);
             }
-        } else if ((params->srcRange == AVIF_RANGE_LIMITED) && (params->dstRange == AVIF_RANGE_LIMITED)) {
+        } else if ((src->range == AVIF_RANGE_LIMITED) && (dst->range == AVIF_RANGE_LIMITED)) {
             // limited -> limited
 
-            if (params->srcDepth > 8) {
-                if (params->dstDepth > 8) {
+            if (src->depth > 8) {
+                if (dst->depth > 8) {
                     // depth rescale, limited -> limited, uint16_t -> uint16_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                            srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                            srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                            *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                            dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                            *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                         }
                     }
                 } else {
                     // depth rescale, limited -> limited, uint16_t -> uint8_t
 
-                    for (uint32_t j = 0; j < params->height; ++j) {
-                        uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                        uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                        for (uint32_t i = 0; i < params->width; ++i) {
-                            int srcAlpha = *((uint16_t *)&srcRow[i * params->srcPixelBytes]);
-                            srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                    for (uint32_t j = 0; j < src->height; ++j) {
+                        uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                        uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                        for (uint32_t i = 0; i < src->width; ++i) {
+                            int srcAlpha = *((uint16_t *)&srcRow[i * src->pixelBytes]);
+                            srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                             float alphaF = (float)srcAlpha / srcMaxChannelF;
                             int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                             dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                            dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                            dstRow[i * params->dstPixelBytes] = (uint8_t)dstAlpha;
+                            dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                            dstRow[i * dst->pixelBytes] = (uint8_t)dstAlpha;
                         }
                     }
                 }
             } else {
                 // depth rescale, limited -> limited, uint8_t -> uint16_t
 
-                for (uint32_t j = 0; j < params->height; ++j) {
-                    uint8_t * srcRow = &params->srcPlane[params->srcOffsetBytes + (j * params->srcRowBytes)];
-                    uint8_t * dstRow = &params->dstPlane[params->dstOffsetBytes + (j * params->dstRowBytes)];
-                    for (uint32_t i = 0; i < params->width; ++i) {
-                        int srcAlpha = srcRow[i * params->srcPixelBytes];
-                        srcAlpha = avifLimitedToFullY(params->srcDepth, srcAlpha);
+                for (uint32_t j = 0; j < src->height; ++j) {
+                    uint8_t * srcRow = &src->plane[src->offsetBytes + (j * src->rowBytes)];
+                    uint8_t * dstRow = &dst->plane[dst->offsetBytes + (j * dst->rowBytes)];
+                    for (uint32_t i = 0; i < src->width; ++i) {
+                        int srcAlpha = srcRow[i * src->pixelBytes];
+                        srcAlpha = avifLimitedToFullY(src->depth, srcAlpha);
                         float alphaF = (float)srcAlpha / srcMaxChannelF;
                         int dstAlpha = (int)(0.5f + (alphaF * dstMaxChannelF));
                         dstAlpha = AVIF_CLAMP(dstAlpha, 0, dstMaxChannel);
-                        dstAlpha = avifFullToLimitedY(params->dstDepth, dstAlpha);
-                        *((uint16_t *)&dstRow[i * params->dstPixelBytes]) = (uint16_t)dstAlpha;
+                        dstAlpha = avifFullToLimitedY(dst->depth, dstAlpha);
+                        *((uint16_t *)&dstRow[i * dst->pixelBytes]) = (uint16_t)dstAlpha;
                     }
                 }
 
-                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (params->srcDepth == params->dstDepth) block above.
-                // assert(params->dstDepth > 8);
+                // If (srcDepth == 8), dstDepth must be >8 otherwise we'd be in the (src->depth == dst->depth) block above.
+                // assert(dst->depth > 8);
             }
         }
     }

@@ -624,7 +624,7 @@ static avifResult avifEncoderAddImageInternal(avifEncoder * encoder,
             // be a fade out later in the sequence. This is why we only check it if we are encoding a
             // single image.
 
-            avifAlphaParams params;
+            avifAlphaData alphaData;
             encoder->data->alphaPresent = AVIF_FALSE;
             for (uint32_t cellIndex = 0; cellIndex < cellCount; ++cellIndex) {
                 const avifImage * cellImage = cellImages[cellIndex];
@@ -633,16 +633,8 @@ static avifResult avifEncoderAddImageInternal(avifEncoder * encoder,
                     continue;
                 }
 
-                params.width = cellImage->width;
-                params.height = cellImage->height;
-                params.srcDepth = cellImage->depth;
-                params.srcRange = cellImage->alphaRange;
-                params.srcPlane = cellImage->alphaPlane;
-                params.srcRowBytes = cellImage->alphaRowBytes;
-                params.srcOffsetBytes = 0;
-                params.srcPixelBytes = avifImageUsesU16(cellImage) ? 2 : 1;
-
-                if (!avifCheckAlphaOpaque(&params)) {
+                avifAlphaDataFromAvifImage(&alphaData, cellImage);
+                if (!avifCheckAlphaOpaque(&alphaData)) {
                     encoder->data->alphaPresent = AVIF_TRUE;
                     break;
                 }
