@@ -166,18 +166,11 @@ static avifResult avifPrepareSharpYUVReformatExtraState(const avifImage * image,
     exState->wDiffPrevious = DBL_MAX;
     exState->baseWeight = 1.f / (float)(1 << (image->depth));
 
-    avifAlphaParams params;
-    params.width = rgb->width;
-    params.height = rgb->height;
-    params.srcDepth = rgb->depth;
-    params.srcRange = AVIF_RANGE_FULL;
-    params.srcPlane = rgb->pixels;
-    params.srcRowBytes = rgb->rowBytes;
-    params.srcOffsetBytes = state->rgbOffsetBytesA;
-    params.srcPixelBytes = state->rgbPixelBytes;
+    avifAlphaData src;
+    avifAlphaDataFromAvifRGBImage(&src, rgb, state);
 
     exState->shouldAlphaWeighted = image->alphaPlane && image->alphaRowBytes && avifRGBFormatHasAlpha(rgb->format) &&
-                                   !rgb->ignoreAlpha && !avifCheckAlphaOpaque(&params);
+                                   !rgb->ignoreAlpha && !avifCheckAlphaOpaque(&src);
 
     exState->floatSize = sizeof(float);
 
@@ -835,29 +828,17 @@ avifResult avifImageRGBtoYUVSharp(avifImage * image, const avifRGBImage * rgb, a
     if (avifPrepareSharpYUVReformatExtraState(image, rgb, state, &exState) != AVIF_RESULT_OK) {
         return AVIF_RESULT_REFORMAT_FAILED;
     }
+
     if (image->alphaPlane && image->alphaRowBytes) {
-        avifAlphaParams params;
+        avifAlphaData dst;
+        avifAlphaDataFromAvifImage(&dst, image);
 
-        params.width = image->width;
-        params.height = image->height;
-        params.dstDepth = image->depth;
-        params.dstRange = image->alphaRange;
-        params.dstPlane = image->alphaPlane;
-        params.dstRowBytes = image->alphaRowBytes;
-        params.dstOffsetBytes = 0;
-        params.dstPixelBytes = state->yuvChannelBytes;
-
-        if (exState.shouldAlphaWeighted) {
-            params.srcDepth = rgb->depth;
-            params.srcRange = AVIF_RANGE_FULL;
-            params.srcPlane = rgb->pixels;
-            params.srcRowBytes = rgb->rowBytes;
-            params.srcOffsetBytes = state->rgbOffsetBytesA;
-            params.srcPixelBytes = state->rgbPixelBytes;
-
-            avifReformatAlpha(&params);
+        if (avifRGBFormatHasAlpha(rgb->format) && !rgb->ignoreAlpha) {
+            avifAlphaData src;
+            avifAlphaDataFromAvifRGBImage(&src, rgb, state);
+            avifReformatAlpha(&src, &dst);
         } else {
-            avifFillAlpha(&params);
+            avifFillAlpha(&dst);
         }
     }
 
