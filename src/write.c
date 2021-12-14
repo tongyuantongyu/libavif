@@ -1585,6 +1585,9 @@ avifResult avifEncoderFinish(avifEncoder * encoder, avifRWData * output)
         } while (hasMoreSample);
     }
 
+    avifArrayDestroy(&layeredColorItems);
+    avifArrayDestroy(&layeredAlphaItems);
+
     avifRWStreamFinishBox(&s, mdat);
 
     // -----------------------------------------------------------------------
