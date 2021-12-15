@@ -143,6 +143,7 @@ avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifAppReadOp
     avifRGBImageSetDefaults(&rgb, avif);
     rgb.depth = imgBitDepth;
     rgb.useSharpYUVConversion = options.useSharpYUV;
+    rgb.ignoreAlpha = options.ignoreAlpha;
     avifRGBImageAllocatePixels(&rgb);
     rowPointers = (png_bytep *)malloc(sizeof(png_bytep) * rgb.height);
     for (uint32_t y = 0; y < rgb.height; ++y) {

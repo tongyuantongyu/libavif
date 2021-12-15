@@ -44,6 +44,7 @@ typedef struct avifInput
     avifPixelFormat requestedFormat;
     int requestedDepth;
     avifBool useSharpYUV;
+    avifBool ignoreAlpha;
     avifBool useStdin;
 } avifInput;
 
@@ -102,6 +103,7 @@ static void syntax(void)
     printf("                                        If neither duration nor timescale are set, avifenc will attempt to use the framerate stored in a y4m header, if present.\n");
     printf("    -k,--keyframe INTERVAL            : Set the forced keyframe interval (maximum frames between keyframes). Set to 0 to disable (default).\n");
     printf("    --ignore-icc                      : If the input file contains an embedded ICC profile, ignore it (no-op if absent)\n");
+    printf("    --ignore-alpha                    : Ignore alpha of input file. (Does not affect y4m)\n");
     printf("    --pasp H,V                        : Add pasp property (aspect ratio). H=horizontal spacing, V=vertical spacing\n");
     printf("    --crop CROPX,CROPY,CROPW,CROPH    : Add clap property (clean aperture), but calculated from a crop rectangle\n");
     printf("    --clap WN,WD,HN,HD,HON,HOD,VON,VOD: Add clap property (clean aperture). Width, Height, HOffset, VOffset (in num/denom pairs)\n");
@@ -285,6 +287,7 @@ static avifAppFileFormat avifInputReadImage(avifInput * input, avifImage * image
     options.requestedFormat = input->requestedFormat;
     options.requestedDepth = input->requestedDepth;
     options.useSharpYUV = input->useSharpYUV;
+    options.ignoreAlpha = input->ignoreAlpha;
 
     const avifAppFileFormat nextInputFormat =
         avifReadImage(input->files[input->fileIndex].filename, options, image, outDepth, sourceTiming, &input->frameIter);
@@ -688,6 +691,8 @@ int main(int argc, char * argv[])
             free(tempBuffer);
         } else if (!strcmp(arg, "--ignore-icc")) {
             ignoreICC = AVIF_TRUE;
+        } else if (!strcmp(arg, "--ignore-alpha")) {
+            input.ignoreAlpha = AVIF_TRUE;
         } else if (!strcmp(arg, "--pasp")) {
             NEXTARG();
             paspCount = parseU32List(paspValues, arg);

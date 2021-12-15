@@ -64,6 +64,7 @@ typedef struct avifAppReadOptions
     avifPixelFormat requestedFormat;
     uint32_t requestedDepth;
     avifBool useSharpYUV;
+    avifBool ignoreAlpha;
 } avifAppReadOptions;
 
 // This structure holds options for writing images.

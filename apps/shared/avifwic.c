@@ -292,6 +292,9 @@ avifBool avifWICRead(const char * inputFilename, avifImage * avif, avifAppReadOp
     avifBool needConversion = avifSetRGBImageFormat(&rgb, &srcFormat, avif->depth);
     avifRGBImageAllocatePixels(&rgb);
     rgb.useSharpYUVConversion = options.useSharpYUV;
+    if (options.ignoreAlpha) {
+        rgb.ignoreAlpha = options.ignoreAlpha;
+    }
 
     // read pixels
     if (!needConversion) {
