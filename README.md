@@ -1,3 +1,12 @@
+## This is [TYTY](https://github.com/tongyuantongyu)'s customized version of [libavif](https://github.com/AOMediaCodec/libavif)
+
+Added features:
+
+- SharpYUV: much like libwebp's `-sharp_yuv`.
+- Encode of layered (progressive) AVIF files. (Current API and CLI design works but not in good shape. They will probably be changed in the future, **WITHOUT COMPATIBILITY GUARANTEE**)
+- Using WIC (Windows Imaging Component) to load any image format it supports.
+- `--ignore-alpha` to always ignore alpha from input.
+
 # libavif [![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/github/louquillio/libavif?branch=master&svg=true)](https://ci.appveyor.com/project/louquillio/libavif) [![Travis Build Status](https://travis-ci.com/AOMediaCodec/libavif.svg?branch=master)](https://travis-ci.com/AOMediaCodec/libavif)
 
 This library aims to be a friendly, portable C implementation of the AV1 Image
