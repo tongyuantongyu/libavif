@@ -1240,6 +1240,14 @@ avifResult avifEncoderFinish(avifEncoder * encoder, avifRWData * output)
             }
             avifRWStreamFinishBox(&dedup->s, a1lx);
             ipmaPush(&item->ipma, avifItemPropertyDedupFinish(dedup, &s), AVIF_FALSE);
+
+            // Layer Selector Property
+
+            avifItemPropertyDedupStart(dedup);
+            avifBoxMarker lsel = avifRWStreamWriteBox(&dedup->s, "lsel", AVIF_BOX_SIZE_TBD);
+            avifRWStreamWriteU16(&dedup->s, 0xffff);  // write special value 0xffff to enable progressive rendering
+            avifRWStreamFinishBox(&dedup->s, lsel);
+            ipmaPush(&item->ipma, avifItemPropertyDedupFinish(dedup, &s), AVIF_TRUE);
         }
     }
     avifRWStreamFinishBox(&s, ipco);
