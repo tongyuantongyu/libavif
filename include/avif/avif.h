@@ -1008,6 +1008,7 @@ typedef struct avifLayerConfig
 {
     int minQuantizer;
     int maxQuantizer;
+    int cqLevel;
     avifScalingMode horizontalMode;
     avifScalingMode verticalMode;
 } avifLayerConfig;

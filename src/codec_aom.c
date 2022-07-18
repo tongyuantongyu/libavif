@@ -789,21 +789,18 @@ static avifResult aomCodecEncodeImage(avifCodec * codec,
     }
 
     if (extraLayerCount > 0) {
-        // Provide a way to set per-layer cq-level to allow using q and cq mode in layered image.
+        minQuantizer = AVIF_CLAMP(encoder->layers[layerIndex].minQuantizer, 0, 63);
+        maxQuantizer = AVIF_CLAMP(encoder->layers[layerIndex].maxQuantizer, 0, 63);
+        if (alpha) {
+            minQuantizer = AVIF_CLAMP(encoder->layersAlpha[layerIndex].minQuantizer, 0, 63);
+            maxQuantizer = AVIF_CLAMP(encoder->layersAlpha[layerIndex].maxQuantizer, 0, 63);
+        }
         if (cfg->rc_end_usage == AOM_Q || cfg->rc_end_usage == AOM_CQ) {
-            unsigned int cqLevel;
-            if (alpha) {
-                cqLevel = (encoder->layersAlpha[layerIndex].minQuantizer + encoder->layersAlpha[layerIndex].maxQuantizer) / 2;
-            } else {
-                cqLevel = (encoder->layers[layerIndex].minQuantizer + encoder->layers[layerIndex].maxQuantizer) / 2;
-            }
-            aom_codec_control(&codec->internal->encoder, AOME_SET_CQ_LEVEL, cqLevel);
-        } else {
-            minQuantizer = AVIF_CLAMP(encoder->layers[layerIndex].minQuantizer, 0, 63);
-            maxQuantizer = AVIF_CLAMP(encoder->layers[layerIndex].maxQuantizer, 0, 63);
-            if (alpha) {
-                minQuantizer = AVIF_CLAMP(encoder->layersAlpha[layerIndex].minQuantizer, 0, 63);
-                maxQuantizer = AVIF_CLAMP(encoder->layersAlpha[layerIndex].maxQuantizer, 0, 63);
+            codec->internal->cqLevelSet = AVIF_TRUE;
+            if (aom_codec_control(&codec->internal->encoder,
+                                  AOME_SET_CQ_LEVEL,
+                                  alpha ? encoder->layersAlpha[layerIndex].cqLevel : encoder->layers[layerIndex].cqLevel) != AOM_CODEC_OK) {
+                return AVIF_RESULT_UNKNOWN_ERROR;
             }
         }
     }
