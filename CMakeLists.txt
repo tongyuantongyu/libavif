@@ -199,12 +199,16 @@ set(AVIF_SRCS
 set(AVIF_PLATFORM_DEFINITIONS)
 set(AVIF_PLATFORM_INCLUDES)
 set(AVIF_PLATFORM_LIBRARIES)
-if(UNIX)
+if(UNIX OR MINGW)
     # Find out if we have threading available
     set(CMAKE_THREAD_PREFER_PTHREADS ON)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads)
     set(AVIF_PLATFORM_LIBRARIES m Threads::Threads)
+
+    if (NOT BUILD_SHARED_LIBS AND MINGW)
+        link_libraries(-Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic)
+    endif()
 endif()
 
 find_package(libyuv QUIET) # not required

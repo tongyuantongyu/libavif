@@ -1,0 +1,22 @@
+diff --git a/src/utils/memory.h b/src/utils/memory.h
+index a8da53b..5094722 100644
+--- a/src/utils/memory.h
++++ b/src/utils/memory.h
+@@ -55,7 +55,7 @@ enum {
+ // void AlignedFree(void* aligned_memory);
+ //   Free aligned memory.
+ 
+-#if defined(_MSC_VER)  // MSVC
++#if defined(_WIN32)  // Windows
+ 
+ inline void* AlignedAlloc(size_t alignment, size_t size) {
+   return _aligned_malloc(size, alignment);
+@@ -63,7 +63,7 @@ inline void* AlignedAlloc(size_t alignment, size_t size) {
+ 
+ inline void AlignedFree(void* aligned_memory) { _aligned_free(aligned_memory); }
+ 
+-#else  // !defined(_MSC_VER)
++#else  // !defined(_WIN32)
+ 
+ inline void* AlignedAlloc(size_t alignment, size_t size) {
+ #if defined(__ANDROID__)

@@ -1,0 +1,111 @@
+name: Build (Windows)
+
+on:
+  push:
+    branches:
+      - custom
+  
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      SUPPORT_AOM: ON
+      SUPPORT_DAV1D: ON
+      SUPPORT_RAV1E: ON
+      SUPPORT_LIBGAV1: OFF
+      SUPPORT_SVT: ON
+      SUPPORT_YUV: ON
+    steps:
+    - uses: actions/checkout@v2
+    - name: Cache external dependencies
+      id: cache-ext
+      uses: actions/cache@v2
+      with:
+        path: ext
+        key: ${{ runner.os }}-${{ hashFiles('ext/*.cmd') }}-${{ env.SUPPORT_AOM }}-${{ env.SUPPORT_DAV1D }}-${{ env.SUPPORT_RAV1E }}-${{ env.SUPPORT_LIBGAV1 }}-${{ env.SUPPORT_SVT }}-${{ env.SUPPORT_YUV }}
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: git patch mingw-w64-x86_64-toolchain mingw-w64-x86_64-python mingw-w64-x86_64-rust mingw-w64-x86_64-cargo-c mingw-w64-x86_64-gcc-libs mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-meson mingw-w64-x86_64-nasm
+    - name: Version Info
+      if: steps.cache-ext.outputs.cache-hit != 'true'
+      run: |
+        cc --version
+        c++ --version
+        rustc -vV
+        cargo -vV
+        ninja --version
+        nasm --version
+    - name: Build Config
+      run: |
+        echo "CMAKE_OPTIONS=-DCMAKE_BUILD_TYPE=Release -DAVIF_CODEC_AOM=${{ env.SUPPORT_AOM }} -DAVIF_LOCAL_AOM=ON -DAVIF_CODEC_DAV1D=${{ env.SUPPORT_DAV1D }} -DAVIF_LOCAL_DAV1D=ON -DAVIF_CODEC_RAV1E=${{ env.SUPPORT_RAV1E }} -DAVIF_LOCAL_RAV1E=ON -DAVIF_CODEC_LIBGAV1=${{ env.SUPPORT_LIBGAV1 }} -DAVIF_LOCAL_LIBGAV1=ON -DAVIF_CODEC_SVT=${{ env.SUPPORT_SVT }} -DAVIF_LOCAL_SVT=ON -DAVIF_LOCAL_LIBYUV=${{ env.SUPPORT_YUV }} -DAVIF_ENABLE_WERROR=OFF" >> $GITHUB_ENV
+        echo "CMAKE_APP_OPTIONS=-DAVIF_LOCAL_JPEG=ON -DAVIF_LOCAL_ZLIBPNG=ON" >> $GITHUB_ENV
+        echo "VERSION_STRING=`git rev-parse --short=8 HEAD`" >> $GITHUB_ENV
+    - name: Build aom
+      if: ${{ env.SUPPORT_AOM == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash ./aom.cmd
+    - name: Build dav1d
+      if: ${{ env.SUPPORT_DAV1D == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash ./dav1d.cmd
+    - name: Build libgav1
+      if: ${{ env.SUPPORT_LIBGAV1 == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash  ./libgav1_msys2.sh
+    - name: Build rav1e
+      if: ${{ env.SUPPORT_RAV1E == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash ./rav1e_msys2.sh
+    - name: Build svt
+      if: ${{ env.SUPPORT_SVT == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash ./svt.cmd
+    - name: Build libyuv
+      if: ${{ env.SUPPORT_YUV == 'ON' && steps.cache-ext.outputs.cache-hit != 'true' }}
+      run: |
+        cd ext
+        bash ./libyuv.cmd
+    - name: Get libjpeg / zlibpng
+      if: steps.cache-ext.outputs.cache-hit != 'true'
+      run: |
+        cd ext
+        bash ./libjpeg.cmd
+        bash ./zlibpng.cmd
+    - name: Build (static libs / apps)
+      run: |
+        mkdir build
+        cd build
+        cmake --version
+        cmake .. -G Ninja ${{ env.CMAKE_OPTIONS }} ${{ env.CMAKE_APP_OPTIONS }} -DBUILD_SHARED_LIBS=OFF -DAVIF_BUILD_APPS=ON -DAVIF_ENABLE_WERROR=OFF
+        cmake --build .
+    - name: Build (shared libs)
+      run: |
+        mkdir build-dll
+        cd build-dll
+        cmake --version
+        cmake .. -G Ninja ${{ env.CMAKE_OPTIONS }} -DBUILD_SHARED_LIBS=ON -DAVIF_BUILD_APPS=OFF -DAVIF_ENABLE_WERROR=OFF
+        cmake --build .
+    - name: Copy artifact
+      run: |
+        mkdir artifact
+        cp -r include artifact/
+        cp -r examples artifact/
+        mkdir artifact/lib
+        cp build/*.exe artifact/
+        cp build/*.a artifact/lib/
+        cp build-dll/*.dll artifact/lib/
+        cp build-dll/*.a artifact/lib/
+    - uses: actions/upload-artifact@v2
+      with:
+         name: libavif_windows_x64_${{ env.VERSION_STRING }}_Release
+         path: artifact

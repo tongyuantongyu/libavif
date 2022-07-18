@@ -11,6 +11,8 @@
 git clone -b v3.4.0 --depth 1 https://aomedia.googlesource.com/aom
 
 cd aom
+patch -p1 < ../aom_fix_1_8_scale.patch
+patch -p1 < ../aom_fix_odd_dimension_scale.patch
 mkdir build.libavif
 cd build.libavif
 

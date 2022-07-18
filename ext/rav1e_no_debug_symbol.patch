@@ -1,0 +1,13 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 526ffa7..318f135 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -153,7 +153,7 @@ harness = false
+ opt-level = 1
+ 
+ [profile.release]
+-debug = true
++debug = false
+ incremental = true
+ lto = "thin"
+ 

@@ -1,0 +1,356 @@
+Index: aom_scale/aom_scale_rtcd.pl
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/aom_scale/aom_scale_rtcd.pl b/aom_scale/aom_scale_rtcd.pl
+--- a/aom_scale/aom_scale_rtcd.pl	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/aom_scale/aom_scale_rtcd.pl	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -52,4 +52,5 @@
+ specialize qw/aom_extend_frame_inner_borders dspr2/;
+ 
+ add_proto qw/void aom_extend_frame_borders_y/, "struct yv12_buffer_config *ybf";
++add_proto qw/void aom_extend_frame_borders_uv/, "struct yv12_buffer_config *ybf";
+ 1;
+Index: aom_scale/generic/yv12extend.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/aom_scale/generic/yv12extend.c b/aom_scale/generic/yv12extend.c
+--- a/aom_scale/generic/yv12extend.c	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/aom_scale/generic/yv12extend.c	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -210,6 +210,35 @@
+                ext_size + ybf->y_width - ybf->y_crop_width);
+ }
+ 
++void aom_extend_frame_borders_uv_c(YV12_BUFFER_CONFIG *ybf) {
++  int ext_size = ybf->border;
++  assert(ybf->y_height - ybf->y_crop_height < 16);
++  assert(ybf->y_width - ybf->y_crop_width < 16);
++  assert(ybf->y_height - ybf->y_crop_height >= 0);
++  assert(ybf->y_width - ybf->y_crop_width >= 0);
++
++  const int ss_x = ybf->subsampling_x;
++  const int ss_y = ybf->subsampling_y;
++  const int top = ext_size >> ss_y;
++  const int left = ext_size >> ss_x;
++  const int bottom = top + ybf->uv_height - ybf->uv_crop_height;
++  const int right = left + ybf->uv_width - ybf->uv_crop_width;
++
++#if CONFIG_AV1_HIGHBITDEPTH
++  if (ybf->flags & YV12_FLAG_HIGHBITDEPTH) {
++    extend_plane_high(ybf->u_buffer, ybf->uv_stride, ybf->uv_crop_width,
++                      ybf->uv_crop_height, top, left, bottom, right);
++    extend_plane_high(ybf->v_buffer, ybf->uv_stride, ybf->uv_crop_width,
++                      ybf->uv_crop_height, top, left, bottom, right);
++    return;
++  }
++#endif
++  extend_plane(ybf->u_buffer, ybf->uv_stride, ybf->uv_crop_width,
++               ybf->uv_crop_height, top, left, bottom, right);
++  extend_plane(ybf->v_buffer, ybf->uv_stride, ybf->uv_crop_width,
++               ybf->uv_crop_height, top, left, bottom, right);
++}
++
+ #if CONFIG_AV1_HIGHBITDEPTH
+ static void memcpy_short_addr(uint8_t *dst8, const uint8_t *src8, int num) {
+   uint16_t *dst = CONVERT_TO_SHORTPTR(dst8);
+Index: av1/common/arm/resize_neon.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/av1/common/arm/resize_neon.c b/av1/common/arm/resize_neon.c
+--- a/av1/common/arm/resize_neon.c	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/av1/common/arm/resize_neon.c	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -700,9 +700,11 @@
+                                       const int phase, const int num_planes) {
+   // We use AOMMIN(num_planes, MAX_MB_PLANE) instead of num_planes to quiet
+   // the static analysis warnings.
+-  int scaled = 0;
++  int scaled_y = 0;
++  int scaled_uv = 0;
+   for (int i = 0; i < AOMMIN(num_planes, MAX_MB_PLANE); ++i) {
+     const int is_uv = i > 0;
++    int *const scaled = is_uv ? &scaled_uv : &scaled_y;
+     const int src_w = src->crop_widths[is_uv];
+     const int src_h = src->crop_heights[is_uv];
+     const int dst_w = dst->crop_widths[is_uv];
+@@ -711,7 +713,7 @@
+     const int dst_y_h = (dst->crop_heights[0] + 1) & ~1;
+ 
+     if (2 * dst_w == src_w && 2 * dst_h == src_h) {
+-      scaled = 1;
++      *scaled = 1;
+       if (phase == 0) {
+         scale_plane_2_to_1_phase_0(src->buffers[i], src->strides[is_uv],
+                                    dst->buffers[i], dst->strides[is_uv], dst_w,
+@@ -737,11 +739,11 @@
+                                      temp_buffer);
+           free(temp_buffer);
+         } else {
+-          scaled = 0;
++          *scaled = 0;
+         }
+       }
+     } else if (4 * dst_w == src_w && 4 * dst_h == src_h) {
+-      scaled = 1;
++      *scaled = 1;
+       if (phase == 0) {
+         scale_plane_4_to_1_phase_0(src->buffers[i], src->strides[is_uv],
+                                    dst->buffers[i], dst->strides[is_uv], dst_w,
+@@ -767,7 +769,7 @@
+                                      temp_buffer);
+           free(temp_buffer);
+         } else {
+-          scaled = 0;
++          *scaled = 0;
+         }
+       }
+     } else if (4 * dst_w == 3 * src_w && 4 * dst_h == 3 * src_h) {
+@@ -777,7 +779,7 @@
+       uint8_t *const temp_buffer =
+           (uint8_t *)malloc(buffer_stride * buffer_height);
+       if (temp_buffer) {
+-        scaled = 1;
++        *scaled = 1;
+         if (filter == BILINEAR) {
+           scale_plane_4_to_3_bilinear(src->buffers[i], src->strides[is_uv],
+                                       dst->buffers[i], dst->strides[is_uv],
+@@ -793,13 +795,22 @@
+         }
+         free(temp_buffer);
+       } else {
+-        scaled = 0;
++        *scaled = 0;
+       }
+     }
+   }
+-  if (!scaled) {
+-    av1_resize_and_extend_frame_c(src, dst, filter, phase, num_planes);
++  if (scaled_y) {
++    aom_extend_frame_borders_y(dst);
+   } else {
+-    aom_extend_frame_borders(dst, num_planes);
++    av1_resize_and_extend_plane_c(src, dst, filter, phase, 0);
++  }
++
++  if (num_planes != 1) {
++    if (scaled_uv) {
++      aom_extend_frame_borders_uv(dst);
++    } else {
++      av1_resize_and_extend_plane_c(src, dst, filter, phase, 1);
++      av1_resize_and_extend_plane_c(src, dst, filter, phase, 2);
++    }
+   }
+ }
+Index: av1/common/av1_rtcd_defs.pl
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/av1/common/av1_rtcd_defs.pl b/av1/common/av1_rtcd_defs.pl
+--- a/av1/common/av1_rtcd_defs.pl	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/av1/common/av1_rtcd_defs.pl	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -268,6 +268,7 @@
+ # Resize functions.
+ add_proto qw/void av1_resize_and_extend_frame/, "const YV12_BUFFER_CONFIG *src, YV12_BUFFER_CONFIG *dst, const InterpFilter filter, const int phase, const int num_planes";
+ specialize qw/av1_resize_and_extend_frame ssse3 neon/;
++add_proto qw/void av1_resize_and_extend_plane/, "const YV12_BUFFER_CONFIG *src, YV12_BUFFER_CONFIG *dst, const InterpFilter filter, const int phase, const int plane_index";
+ 
+ #
+ # Encoder functions below this point.
+Index: av1/common/resize.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/av1/common/resize.c b/av1/common/resize.c
+--- a/av1/common/resize.c	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/av1/common/resize.c	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -1189,42 +1189,49 @@
+ }
+ #endif  // CONFIG_AV1_HIGHBITDEPTH
+ 
+-void av1_resize_and_extend_frame_c(const YV12_BUFFER_CONFIG *src,
++void av1_resize_and_extend_plane_c(const YV12_BUFFER_CONFIG *src,
+                                    YV12_BUFFER_CONFIG *dst,
+                                    const InterpFilter filter,
+                                    const int phase_scaler,
+-                                   const int num_planes) {
+-  const int src_w = src->y_crop_width;
+-  const int src_h = src->y_crop_height;
+-  const uint8_t *const srcs[3] = { src->y_buffer, src->u_buffer,
+-                                   src->v_buffer };
+-  const int src_strides[3] = { src->y_stride, src->uv_stride, src->uv_stride };
+-  uint8_t *const dsts[3] = { dst->y_buffer, dst->u_buffer, dst->v_buffer };
+-  const int dst_strides[3] = { dst->y_stride, dst->uv_stride, dst->uv_stride };
++                                   const int plane_index) {
+   assert(filter == BILINEAR || filter == EIGHTTAP_SMOOTH ||
+          filter == EIGHTTAP_REGULAR);
+   const InterpKernel *const kernel =
+       filter == BILINEAR ? av1_bilinear_filters : av1_sub_pel_filters_8smooth;
+-  const int dst_w = dst->y_crop_width;
+-  const int dst_h = dst->y_crop_height;
+-  for (int i = 0; i < AOMMIN(num_planes, MAX_MB_PLANE); ++i) {
+-    const int factor = (i == 0 || i == 3 ? 1 : 2);
+-    const int src_stride = src_strides[i];
+-    const int dst_stride = dst_strides[i];
+-    for (int y = 0; y < dst_h; y += 16) {
+-      const int y_q4 = y * (16 / factor) * src_h / dst_h + phase_scaler;
+-      for (int x = 0; x < dst_w; x += 16) {
+-        const int x_q4 = x * (16 / factor) * src_w / dst_w + phase_scaler;
+-        const uint8_t *src_ptr = srcs[i] +
+-                                 (y / factor) * src_h / dst_h * src_stride +
+-                                 (x / factor) * src_w / dst_w;
+-        uint8_t *dst_ptr = dsts[i] + (y / factor) * dst_stride + (x / factor);
++
++  const int plane_index_ = AOMMIN(plane_index, MAX_MB_PLANE);
++  const int dim_index = plane_index_ > 0 ? 1 : 0;
++  const int src_w = src->crop_widths[dim_index];
++  const int src_h = src->crop_heights[dim_index];
++  const int dst_w = dst->crop_widths[dim_index];
++  const int dst_h = dst->crop_heights[dim_index];
++  const int src_stride = src->strides[dim_index];
++  const int dst_stride = dst->strides[dim_index];
++  const uint8_t *const src_buffer = src->buffers[plane_index_];
++  uint8_t *const dst_buffer = dst->buffers[plane_index_];
++
++  for (int y = 0; y < dst_h; y += 16) {
++    const int y_q4 = y * 16 * src_h / dst_h + phase_scaler;
++    for (int x = 0; x < dst_w; x += 16) {
++      const int x_q4 = x * 16 * src_w / dst_w + phase_scaler;
++      const uint8_t *src_ptr =
++          src_buffer + y * src_h / dst_h * src_stride + x * src_w / dst_w;
++      uint8_t *dst_ptr = dst_buffer + y * dst_stride + x;
+ 
+-        aom_scaled_2d(src_ptr, src_stride, dst_ptr, dst_stride, kernel,
+-                      x_q4 & 0xf, 16 * src_w / dst_w, y_q4 & 0xf,
+-                      16 * src_h / dst_h, 16 / factor, 16 / factor);
+-      }
+-    }
++      aom_scaled_2d(src_ptr, src_stride, dst_ptr, dst_stride, kernel,
++                    x_q4 & 0xf, 16 * src_w / dst_w, y_q4 & 0xf,
++                    16 * src_h / dst_h, 16, 16);
++    }
++  }
++}
++
++void av1_resize_and_extend_frame_c(const YV12_BUFFER_CONFIG *src,
++                                   YV12_BUFFER_CONFIG *dst,
++                                   const InterpFilter filter,
++                                   const int phase_scaler,
++                                   const int num_planes) {
++  for (int i = 0; i < AOMMIN(num_planes, MAX_MB_PLANE); ++i) {
++    av1_resize_and_extend_plane_c(src, dst, filter, phase_scaler, i);
+   }
+ }
+ 
+Index: av1/common/x86/resize_ssse3.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/av1/common/x86/resize_ssse3.c b/av1/common/x86/resize_ssse3.c
+--- a/av1/common/x86/resize_ssse3.c	(revision 7b8076da86169474717a4618386d6abe415f10bf)
++++ b/av1/common/x86/resize_ssse3.c	(revision 1d1cbb017ac7aa2fcf7f83279c044a54dc257c97)
+@@ -815,9 +815,11 @@
+                                        const int phase, const int num_planes) {
+   // We use AOMMIN(num_planes, MAX_MB_PLANE) instead of num_planes to quiet
+   // the static analysis warnings.
+-  int scaled = 0;
++  int scaled_y = 0;
++  int scaled_uv = 0;
+   for (int i = 0; i < AOMMIN(num_planes, MAX_MB_PLANE); ++i) {
+     const int is_uv = i > 0;
++    int *const scaled = is_uv ? &scaled_uv : &scaled_y;
+     const int src_w = src->crop_widths[is_uv];
+     const int src_h = src->crop_heights[is_uv];
+     const int src_y_w = (src->crop_widths[0] + 1) & ~1;
+@@ -828,7 +830,7 @@
+ 
+     if (2 * dst_w == src_w && 2 * dst_h == src_h) {
+       // 2 to 1
+-      scaled = 1;
++      *scaled = 1;
+       if (phase == 0) {
+         scale_plane_2_to_1_phase_0(src->buffers[i], src->strides[is_uv],
+                                    dst->buffers[i], dst->strides[is_uv], dst_w,
+@@ -855,12 +857,12 @@
+                                      temp_buffer);
+           free(temp_buffer);
+         } else {
+-          scaled = 0;
++          *scaled = 0;
+         }
+       }
+     } else if (4 * dst_w == src_w && 4 * dst_h == src_h) {
+       // 4 to 1
+-      scaled = 1;
++      *scaled = 1;
+       if (phase == 0) {
+         scale_plane_4_to_1_phase_0(src->buffers[i], src->strides[is_uv],
+                                    dst->buffers[i], dst->strides[is_uv], dst_w,
+@@ -890,7 +892,7 @@
+                                      temp_buffer);
+           free(temp_buffer);
+         } else {
+-          scaled = 0;
++          *scaled = 0;
+         }
+       }
+     } else if (4 * dst_w == 3 * src_w && 4 * dst_h == 3 * src_h) {
+@@ -911,7 +913,7 @@
+       const int buffer_size = buffer_stride_hor * buffer_height + extra_padding;
+       uint8_t *const temp_buffer = (uint8_t *)malloc(buffer_size);
+       if (temp_buffer) {
+-        scaled = 1;
++        *scaled = 1;
+         const InterpKernel *interp_kernel =
+             (const InterpKernel *)av1_interp_filter_params_list[filter]
+                 .filter_ptr;
+@@ -920,13 +922,13 @@
+                                    dst_h, interp_kernel, phase, temp_buffer);
+         free(temp_buffer);
+       } else {
+-        scaled = 0;
++        *scaled = 0;
+       }
+     } else if (dst_w == src_w * 2 && dst_h == src_h * 2) {
+       // 1 to 2
+       uint8_t *const temp_buffer = (uint8_t *)malloc(8 * ((src_y_w + 7) & ~7));
+       if (temp_buffer) {
+-        scaled = 1;
++        *scaled = 1;
+         const InterpKernel *interp_kernel =
+             (const InterpKernel *)av1_interp_filter_params_list[filter]
+                 .filter_ptr;
+@@ -935,13 +937,23 @@
+                                    src_h, interp_kernel[8], temp_buffer);
+         free(temp_buffer);
+       } else {
+-        scaled = 0;
++        *scaled = 0;
+       }
+     }
+   }
+-  if (!scaled) {
+-    av1_resize_and_extend_frame_c(src, dst, filter, phase, num_planes);
++
++  if (scaled_y) {
++    aom_extend_frame_borders_y(dst);
+   } else {
+-    aom_extend_frame_borders(dst, num_planes);
++    av1_resize_and_extend_plane_c(src, dst, filter, phase, 0);
++  }
++
++  if (num_planes != 1) {
++    if (scaled_uv) {
++      aom_extend_frame_borders_uv(dst);
++    } else {
++      av1_resize_and_extend_plane_c(src, dst, filter, phase, 1);
++      av1_resize_and_extend_plane_c(src, dst, filter, phase, 2);
++    }
+   }
+ }
