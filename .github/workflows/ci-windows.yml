@@ -102,3 +102,13 @@ jobs:
     - name: Build libavif (ninja)
       working-directory: ./build
       run: ninja
+    - name: Get commit hash
+      id: commit_hash
+      uses: pr-mpt/actions-commit-hash@v1
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: libavif_${{ runner.os }}_x64_${{ steps.commit_hash.outputs.short }}_Release
+        path: |
+          build/avifenc.exe
+          build/avifdec.exe
