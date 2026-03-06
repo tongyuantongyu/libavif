@@ -2,3 +2,4 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 add_subdirectory(gdk-pixbuf)
+add_subdirectory(custom-codec-nvidia)
