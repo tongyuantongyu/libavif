@@ -21,10 +21,10 @@ extern "C" {
         uint32_t count;                                    \
         uint32_t capacity;                                 \
     } TYPENAME
-AVIF_NODISCARD avifBool avifArrayCreate(void * arrayStruct, uint32_t elementSize, uint32_t initialCapacity);
-AVIF_NODISCARD void * avifArrayPush(void * arrayStruct);
-void avifArrayPop(void * arrayStruct);
-void avifArrayDestroy(void * arrayStruct);
+AVIF_NODISCARD AVIF_API avifBool avifArrayCreate(void * arrayStruct, uint32_t elementSize, uint32_t initialCapacity);
+AVIF_NODISCARD AVIF_API void * avifArrayPush(void * arrayStruct);
+AVIF_API void avifArrayPop(void * arrayStruct);
+AVIF_API void avifArrayDestroy(void * arrayStruct);
 
 // ---------------------------------------------------------------------------
 // avifDecodeSample
@@ -61,9 +61,9 @@ typedef struct avifCodecEncodeOutput
     avifEncodeSampleArray samples;
 } avifCodecEncodeOutput;
 
-AVIF_NODISCARD avifCodecEncodeOutput * avifCodecEncodeOutputCreate(void);
-avifResult avifCodecEncodeOutputAddSample(avifCodecEncodeOutput * encodeOutput, const uint8_t * data, size_t len, avifBool sync);
-void avifCodecEncodeOutputDestroy(avifCodecEncodeOutput * encodeOutput);
+AVIF_NODISCARD AVIF_API avifCodecEncodeOutput * avifCodecEncodeOutputCreate(void);
+AVIF_API avifResult avifCodecEncodeOutputAddSample(avifCodecEncodeOutput * encodeOutput, const uint8_t * data, size_t len, avifBool sync);
+AVIF_API void avifCodecEncodeOutputDestroy(avifCodecEncodeOutput * encodeOutput);
 
 // ---------------------------------------------------------------------------
 // avifCodecSpecificOptions (key/value string pairs for advanced tuning)
@@ -166,6 +166,25 @@ typedef struct avifCodec
     avifCodecEncodeFinishFunc encodeFinish;
     avifCodecDestroyInternalFunc destroyInternal;
 } avifCodec;
+
+// ---------------------------------------------------------------------------
+// Codec registry
+
+typedef const char * (*versionFunc)(void);
+typedef avifCodec * (*avifCodecCreateFunc)(void);
+
+typedef struct avifCodecInformation
+{
+    avifCodecChoice choice;
+
+    avifCodecType type;
+    const char * name;
+    versionFunc version;
+    avifCodecCreateFunc create;
+    uint32_t flags;
+} avifCodecInformation;
+
+AVIF_API avifResult avifRegisterCustomCodec(avifCodecInformation * codec);
 
 #ifdef __cplusplus
 } // extern "C"
