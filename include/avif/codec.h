@@ -76,6 +76,19 @@ typedef struct avifCodecSpecificOption
 AVIF_ARRAY_DECLARE(avifCodecSpecificOptions, avifCodecSpecificOption, entries);
 
 // ---------------------------------------------------------------------------
+// avifCodecType (underlying video format)
+
+// Alliance for Open Media video formats that can be used in the AVIF image format.
+typedef enum avifCodecType
+{
+    AVIF_CODEC_TYPE_UNKNOWN,
+    AVIF_CODEC_TYPE_AV1,
+#if defined(AVIF_CODEC_AVM)
+    AVIF_CODEC_TYPE_AV2, // Experimental.
+#endif
+} avifCodecType;
+
+// ---------------------------------------------------------------------------
 // avifCodec (abstraction layer to use different codec implementations)
 
 struct avifCodec;
