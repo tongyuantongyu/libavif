@@ -523,16 +523,6 @@ avifResult avifCodecSpecificOptionsSet(avifCodecSpecificOptions * csOptions, con
 // ---------------------------------------------------------------------------
 // avifCodecType (underlying video format)
 
-// Alliance for Open Media video formats that can be used in the AVIF image format.
-typedef enum avifCodecType
-{
-    AVIF_CODEC_TYPE_UNKNOWN,
-    AVIF_CODEC_TYPE_AV1,
-#if defined(AVIF_CODEC_AVM)
-    AVIF_CODEC_TYPE_AV2, // Experimental.
-#endif
-} avifCodecType;
-
 // Returns AVIF_CODEC_TYPE_UNKNOWN unless the chosen codec is available with the requiredFlags.
 avifCodecType avifCodecTypeFromChoice(avifCodecChoice choice, avifCodecFlags requiredFlags);
 
