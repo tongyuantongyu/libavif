@@ -1598,7 +1598,7 @@ static avifCodecType avifEncoderGetCodecType(const avifEncoder * encoder)
     return avifCodecTypeFromChoice(encoder->codecChoice, AVIF_CODEC_FLAG_CAN_ENCODE);
 }
 
-static avifResult avifEncoderValidateDisplaySizeOverride(const avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
+static avifResult avifEncoderValidateDisplaySizeOverride(avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
 {
     if (!avifEncoderUsesDisplaySizeOverride(encoder)) {
         return AVIF_RESULT_OK;
