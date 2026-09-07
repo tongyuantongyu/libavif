@@ -2230,7 +2230,7 @@ int main(int argc, char * argv[])
         goto cleanup;
     }
     if (avifSettingsUsesDisplaySizeOverride(&settings) && (settings.layers == 1) && (input.filesCount > 1)) {
-        fprintf(stderr, "ERROR: --display-size is not supported with image sequences. Use --layered for multiple still inputs.\n");
+        fprintf(stderr, "ERROR: --display-size is not supported with image sequences. Use --layered for multiple still image inputs.\n");
         goto cleanup;
     }
 

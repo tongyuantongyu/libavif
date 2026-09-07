@@ -75,6 +75,11 @@ static avifResult svtCodecEncodeImage(avifCodec * codec,
         }
     }
 
+    if (encoder->width || encoder->height) {
+        avifDiagnosticsPrintf(codec->diag, "SVT-AV1 does not support display-size override");
+        return AVIF_RESULT_NOT_IMPLEMENTED;
+    }
+
     // SVT-AV1 does not support encoding layered image.
     if (encoder->extraLayerCount > 0) {
         return AVIF_RESULT_NOT_IMPLEMENTED;
@@ -82,11 +87,6 @@ static avifResult svtCodecEncodeImage(avifCodec * codec,
 
     // SVT-AV1 does not support disabling lagged output. Ignore this setting.
     (void)disableLaggedOutput;
-
-    if (encoder->width || encoder->height) {
-        avifDiagnosticsPrintf(codec->diag, "SVT-AV1 does not support display-size override");
-        return AVIF_RESULT_NOT_IMPLEMENTED;
-    }
 
     avifResult result = AVIF_RESULT_UNKNOWN_ERROR;
     EbColorFormat color_format = EB_YUV420;

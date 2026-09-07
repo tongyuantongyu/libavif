@@ -444,6 +444,11 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
                                       avifAddImageFlags addImageFlags,
                                       avifCodecEncodeOutput * output)
 {
+    if (encoder->width || encoder->height) {
+        avifDiagnosticsPrintf(codec->diag, "AVM does not support display-size override");
+        return AVIF_RESULT_NOT_IMPLEMENTED;
+    }
+
     struct avm_codec_enc_cfg * cfg = &codec->internal->cfg;
     avifBool quantizerUpdated = AVIF_FALSE;
     const int quantizer = avmQualityToQuantizer(quality, image->depth);
@@ -452,11 +457,6 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
     // encoder, config should be applied for each frame, so we don't care about changes on these
     // two fields.
     encoderChanges &= ~AVIF_ENCODER_CHANGE_SCALING_MODE;
-
-    if (encoder->width || encoder->height) {
-        avifDiagnosticsPrintf(codec->diag, "AVM does not support display-size override");
-        return AVIF_RESULT_NOT_IMPLEMENTED;
-    }
 
     if (!codec->internal->encoderInitialized) {
         int avmCpuUsed = -1;

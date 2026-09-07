@@ -822,10 +822,11 @@ typedef struct avifImage
     // transformFlags. On decode, only honor the values in boxes with the associated transform flag set.
     // These also apply to gainMap->image, if any.
     //
-    // When encoding with avifEncoder.width/height set (see its comment), these values are interpreted
-    // relative to that overridden display size rather than to this avifImage's own width/height.
-    // No special handling is needed during decode: the decoded avifImage is automatically scaled to
-    // the display size, so these values are relative to its width/height as usual.
+    // When encoding with avifEncoder.width/height set (see their comment), these transformations
+    // are interpreted relative to that overridden display size rather than to this avifImage's own
+    // width/height. No special handling is needed during decode: the decoded avifImage is
+    // automatically scaled to the display size, so these transformations are relative to the
+    // decoded avifImage's width/height as usual.
     avifTransformFlags transformFlags;
     avifPixelAspectRatioBox pasp;
     avifCleanApertureBox clap;
@@ -1638,7 +1639,7 @@ typedef struct avifEncoder
     // Overrides the image's display size (the width and height AVIF declares this image is meant
     // to be shown at) independent of the pixel dimensions actually encoded. Any image passed to
     // avifEncoderAddImage()/avifEncoderAddImageGrid() that is encoded smaller than the display size
-    // is upscaled to it on decode.
+    // is upscaled to the display size on decode.
     //
     // Defaults to 0 (disabled). When 0, the display size is the size of the first added image.
     // When set, both width and height must be nonzero, and neither can be smaller than the coded
@@ -1661,9 +1662,9 @@ typedef struct avifEncoder
     // decoder is required to honor; a coded image smaller than it is upscaled by the decoder to
     // match. Separately, an AV1 encoder session declares a maximum frame size once, up front, and
     // every later frame must fit within it; by default that maximum is simply the size of the first
-    // frame encoded. Setting width/height also declares that AV1-level maximum explicitly, in
-    // addition to the ispe box, so that later, larger layers stay within it. This is why it must be
-    // at least as large as every layer's coded size.
+    // frame encoded. Setting width/height also declares that AV1-level maximum frame size
+    // explicitly, in addition to the ispe box, so that later, larger layers stay within it. This is
+    // why it must be at least as large as every layer's coded size.
     uint32_t width;
     uint32_t height;
 } avifEncoder;

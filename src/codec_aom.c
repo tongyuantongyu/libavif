@@ -893,14 +893,20 @@ static avifResult aomCodecEncodeImage(avifCodec * codec,
             }
         }
 
-        if ((addImageFlags & AVIF_ADD_IMAGE_FLAG_SINGLE) && (encoder->width == 0) && (encoder->height == 0)) {
+        if (addImageFlags & AVIF_ADD_IMAGE_FLAG_SINGLE) {
             // Set the maximum number of frames to encode to 1. This instructs
             // libaom to set still_picture and reduced_still_picture_header to
             // 1 in AV1 sequence headers.
-            // Still picture header requires frame size to match
-            // max_frame_width and max_frame_height,
-            // so we can't use it if frame can have a different size.
             cfg->g_limit = 1;
+            // Reduced still picture header requires frame size to match max
+            // frame size, so we can't use reduced still picture header if frame
+            // size is different from max frame size.
+            if (cfg->g_forced_max_frame_width > image->width) {
+                cfg->g_forced_max_frame_width = image->width;
+            }
+            if (cfg->g_forced_max_frame_height > image->height) {
+                cfg->g_forced_max_frame_height = image->height;
+            }
         }
         if (useAllIntra) {
 #if !defined(AOM_USAGE_ALL_INTRA)
@@ -939,7 +945,7 @@ static avifResult aomCodecEncodeImage(avifCodec * codec,
             cfg->g_lag_in_frames = 0;
         }
         if ((encoder->width || encoder->height) && (cfg->g_lag_in_frames > 1)) {
-            // libaom does not allow changing frame dimension if
+            // aom_codec_enc_config_set() does not allow changing frame dimensions if
             // g_lag_in_frames > 1.
             cfg->g_lag_in_frames = 1;
         }

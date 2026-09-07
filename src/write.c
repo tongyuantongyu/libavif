@@ -525,8 +525,6 @@ avifEncoder * avifEncoderCreate(void)
     encoder->maxQuantizer = AVIF_QUANTIZER_WORST_QUALITY;
     encoder->minQuantizerAlpha = AVIF_QUANTIZER_BEST_QUALITY;
     encoder->maxQuantizerAlpha = AVIF_QUANTIZER_WORST_QUALITY;
-    encoder->width = 0;
-    encoder->height = 0;
     encoder->tileRowsLog2 = 0;
     encoder->tileColsLog2 = 0;
     encoder->autoTiling = AVIF_FALSE;
@@ -541,6 +539,8 @@ avifEncoder * avifEncoderCreate(void)
     encoder->creationTime = 0;
     encoder->modificationTime = 0;
     encoder->sampleTransformRecipe = AVIF_SAMPLE_TRANSFORM_NONE;
+    encoder->width = 0;
+    encoder->height = 0;
     return encoder;
 }
 
@@ -574,8 +574,6 @@ static void avifEncoderBackupSettings(avifEncoder * encoder)
     lastEncoder->timescale = encoder->timescale;
     lastEncoder->repetitionCount = encoder->repetitionCount;
     lastEncoder->extraLayerCount = encoder->extraLayerCount;
-    lastEncoder->width = encoder->width;
-    lastEncoder->height = encoder->height;
     lastEncoder->minQuantizer = encoder->minQuantizer;
     lastEncoder->maxQuantizer = encoder->maxQuantizer;
     lastEncoder->minQuantizerAlpha = encoder->minQuantizerAlpha;
@@ -586,6 +584,8 @@ static void avifEncoderBackupSettings(avifEncoder * encoder)
     encoder->data->lastTileColsLog2 = encoder->data->tileColsLog2;
     lastEncoder->scalingMode = encoder->scalingMode;
     lastEncoder->sampleTransformRecipe = encoder->sampleTransformRecipe;
+    lastEncoder->width = encoder->width;
+    lastEncoder->height = encoder->height;
 }
 
 // This function detects changes made on avifEncoder. It returns true on success (i.e., if every
@@ -1598,7 +1598,7 @@ static avifCodecType avifEncoderGetCodecType(const avifEncoder * encoder)
     return avifCodecTypeFromChoice(encoder->codecChoice, AVIF_CODEC_FLAG_CAN_ENCODE);
 }
 
-static avifResult avifEncoderValidateDisplaySizeOverride(avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
+static avifResult avifEncoderValidateDisplaySizeOverride(const avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
 {
     if (!avifEncoderUsesDisplaySizeOverride(encoder)) {
         return AVIF_RESULT_OK;
