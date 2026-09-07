@@ -18,24 +18,18 @@ namespace {
 
 constexpr size_t kLayerCount = kMaxNumLayers;
 
-struct UniformScale {
-  int32_t n;
-  int32_t d;
-};
-
-constexpr UniformScale kNoScale = {1, 1};
+constexpr avifFraction kNoScale = {1, 1};
 constexpr size_t kRandomScalingModeCount = kLayerCount - 1;
 static_assert(kRandomScalingModeCount == 3);
-constexpr std::array<UniformScale, 6> kSupportedScalingModes = {
-    UniformScale{1, 8}, UniformScale{1, 4}, UniformScale{1, 2},
-    UniformScale{3, 5}, UniformScale{3, 4}, UniformScale{4, 5}};
-constexpr avifScalingMode kNoScalingMode = {{kNoScale.n, kNoScale.d},
-                                            {kNoScale.n, kNoScale.d}};
+constexpr std::array<avifFraction, 6> kSupportedScalingModes = {
+    avifFraction{1, 8}, avifFraction{1, 4}, avifFraction{1, 2},
+    avifFraction{3, 5}, avifFraction{3, 4}, avifFraction{4, 5}};
+constexpr avifScalingMode kNoScalingMode = {kNoScale, kNoScale};
 constexpr std::array<avifScalingMode, kLayerCount> kNoScalingModes = {
     kNoScalingMode, kNoScalingMode, kNoScalingMode, kNoScalingMode};
 
-constexpr avifScalingMode MakeScalingMode(UniformScale horizontal,
-                                          UniformScale vertical) {
+constexpr avifScalingMode MakeScalingMode(avifFraction horizontal,
+                                          avifFraction vertical) {
   return avifScalingMode{{horizontal.n, horizontal.d},
                          {vertical.n, vertical.d}};
 }
@@ -62,9 +56,9 @@ constexpr size_t CombinationCountWithRepetition(size_t value_count,
 constexpr size_t kScalingModeCombinationCount = CombinationCountWithRepetition(
     kSupportedScalingModes.size(), kRandomScalingModeCount);
 
-std::array<UniformScale, kRandomScalingModeCount> GetScalingModeCombination(
+std::array<avifFraction, kRandomScalingModeCount> GetScalingModeCombination(
     size_t combination_index) {
-  std::array<UniformScale, kRandomScalingModeCount> combination = {};
+  std::array<avifFraction, kRandomScalingModeCount> combination = {};
   size_t remaining_index = combination_index;
   size_t next_candidate = 0;
   for (size_t slot = 0; slot < combination.size(); ++slot) {
