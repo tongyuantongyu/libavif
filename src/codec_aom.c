@@ -898,15 +898,6 @@ static avifResult aomCodecEncodeImage(avifCodec * codec,
             // libaom to set still_picture and reduced_still_picture_header to
             // 1 in AV1 sequence headers.
             cfg->g_limit = 1;
-            // Reduced still picture header requires frame size to match max
-            // frame size, so we can't use reduced still picture header if frame
-            // size is different from max frame size.
-            if (cfg->g_forced_max_frame_width > image->width) {
-                cfg->g_forced_max_frame_width = image->width;
-            }
-            if (cfg->g_forced_max_frame_height > image->height) {
-                cfg->g_forced_max_frame_height = image->height;
-            }
         }
         if (useAllIntra) {
 #if !defined(AOM_USAGE_ALL_INTRA)

@@ -241,7 +241,7 @@ TEST(ChangeSettingTest, UnchangeableImageChromaSamplePosition) {
             AVIF_RESULT_INCOMPATIBLE_IMAGE);
 }
 
-TEST(ChangeSettingTest, UnchangeableDisplaySizeOverride) {
+TEST(ChangeSettingTest, UnchangeableEncoderSize) {
   if (avifCodecName(AVIF_CODEC_CHOICE_AOM, AVIF_CODEC_FLAG_CAN_ENCODE) ==
       nullptr) {
     GTEST_SKIP() << "Codec unavailable, skip test.";
@@ -265,8 +265,14 @@ TEST(ChangeSettingTest, UnchangeableDisplaySizeOverride) {
                                 AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_OK);
 
+  ImagePtr image2 = testutil::CreateImage(/*width=*/256, /*height=*/128,
+                                          /*depth=*/8, AVIF_PIXEL_FORMAT_YUV444,
+                                          AVIF_PLANES_YUV, AVIF_RANGE_FULL);
+  ASSERT_NE(image2, nullptr);
+  testutil::FillImageGradient(image2.get());
+
   encoder->width = 256;
-  ASSERT_EQ(avifEncoderAddImage(encoder.get(), image.get(), 1,
+  ASSERT_EQ(avifEncoderAddImage(encoder.get(), image2.get(), 1,
                                 AVIF_ADD_IMAGE_FLAG_NONE),
             AVIF_RESULT_CANNOT_CHANGE_SETTING);
 }
