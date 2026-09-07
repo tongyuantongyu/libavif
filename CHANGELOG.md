@@ -12,9 +12,8 @@ The changes are relative to the previous release, unless the baseline is specifi
 
 * Add the ignoreICC option to avifDecoder
 * Support ignoring alpha in avifDecoder::imageContentToDecode
-* Support overriding display size in avifEncoder
+* Support encoding layered image with pre-scaled inputs
 * avifenc: add --ignore-alpha flag to discard alpha channel on encode
-* avifenc: add --display-size flag to override display size of encoded image
 * avifgainmaputil: add --ignore-alpha flag to discard alpha channel
 * avifgainmaputil: add --ignore-exif and --ignore-xmp flags
 * avifdec: add --ignore-exif and --ignore-xmp flags

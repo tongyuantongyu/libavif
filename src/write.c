@@ -466,7 +466,7 @@ static avifResult avifItemPropertyDedupFinish(avifItemPropertyDedup * dedup,
 
 static const avifScalingMode noScaling = { { 1, 1 }, { 1, 1 } };
 
-static avifBool avifEncoderUsesDisplaySizeOverride(const avifEncoder * encoder)
+static avifBool avifEncoderSizeIsSet(const avifEncoder * encoder)
 {
     return (encoder->width != 0) || (encoder->height != 0);
 }
@@ -1598,46 +1598,78 @@ static avifCodecType avifEncoderGetCodecType(const avifEncoder * encoder)
     return avifCodecTypeFromChoice(encoder->codecChoice, AVIF_CODEC_FLAG_CAN_ENCODE);
 }
 
-static avifResult avifEncoderValidateDisplaySizeOverride(avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
+static avifResult avifEncoderValidateSize(avifEncoder * encoder, uint32_t gridCols, uint32_t gridRows, const avifImage * firstCell)
 {
-    if (!avifEncoderUsesDisplaySizeOverride(encoder)) {
+    if (!avifEncoderSizeIsSet(encoder)) {
         return AVIF_RESULT_OK;
     }
 
     if ((encoder->width == 0) || (encoder->height == 0)) {
-        avifDiagnosticsPrintf(&encoder->diag,
-                              "display-size override requires both avifEncoder.width and avifEncoder.height to be non-zero");
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width and avifEncoder.height must either both be zero or both be nonzero");
         return AVIF_RESULT_INVALID_ARGUMENT;
     }
 
     if ((gridCols > 1) || (gridRows > 1)) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override is not supported with grid images");
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width/height cannot be set with grid images");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
 
     if (!avifScalingModeIsNoScaling(&encoder->scalingMode)) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override is not supported with encoder->scalingMode");
-        return AVIF_RESULT_NOT_IMPLEMENTED;
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width/height cannot be set together with encoder->scalingMode");
+        return AVIF_RESULT_INVALID_ARGUMENT;
     }
 
     if (encoder->sampleTransformRecipe != AVIF_SAMPLE_TRANSFORM_NONE) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override is not supported with sample transforms");
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width/height cannot be set with sample transforms");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
 
     if (firstCell->gainMap && firstCell->gainMap->image) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override is not supported with gain maps");
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width/height cannot be set with gain maps");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
 
-    if ((encoder->data->items.count > 0) && (encoder->extraLayerCount == 0)) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override is not supported for image sequences");
-        return AVIF_RESULT_NOT_IMPLEMENTED;
+    // According to section 2.2.2 of AV1 Image File Format specification v1.2.0:
+    //   [...] the values of image_width and image_height shall respectively equal the values of
+    //   UpscaledWidth and FrameHeight as defined in [AV1] but for a specific frame in the item
+    //   payload. [...]
+    //   The semantics of the 'ispe' property [...] the values of image_width and image_height shall
+    //   respectively equal the values of UpscaledWidth and FrameHeight as defined in [AV1] but for
+    //   a specific frame in the item payload. [...]
+    //   In the absence of a 'lsel' property associated with the item, or if it is present and its
+    //   layer_id value is set to 0xFFFF:
+    //     If no OperatingPointSelectorProperty is associated with the item, the 'ispe' property
+    //     shall document the dimensions of the last frame decoded when processing the operating
+    //     point whose index is 0.
+    //   NOTE: The dimensions of possible intermediate output images might not match the ones given
+    //   in the 'ispe' property. If renderers display these intermediate images, they are expected
+    //   to scale the output image to match the 'ispe' property.
+    // See https://aomediacodec.github.io/av1-avif/v1.2.0.html#image-spatial-extents-property.
+
+    // Therefore only layered image can have frames of different sizes, so reject otherwise.
+    if (encoder->extraLayerCount == 0) {
+        avifDiagnosticsPrintf(&encoder->diag, "avifEncoder.width/height can only be set for layered images (extraLayerCount > 0)");
+        return AVIF_RESULT_INVALID_ARGUMENT;
     }
 
+    // We tighten the rule to "earlier layers shall be smaller" due to encoder restrictions.
+    // The exact-match requirement for the last layer is enforced below in
+    // avifEncoderAddImageInternal() when adding that image.
     if ((encoder->width < firstCell->width) || (encoder->height < firstCell->height)) {
         avifDiagnosticsPrintf(&encoder->diag,
-                              "display-size override %ux%u must be at least the coded image size %ux%u",
+                              "avifEncoder.width/height %ux%u must be at least the coded image size %ux%u",
+                              encoder->width,
+                              encoder->height,
+                              firstCell->width,
+                              firstCell->height);
+        return AVIF_RESULT_INCOMPATIBLE_IMAGE;
+    }
+
+    // The declared width/height must exactly match the coded size of the last layer.
+    if ((encoder->data->frames.count == encoder->extraLayerCount) &&
+        ((encoder->width != firstCell->width) || (encoder->height != firstCell->height))) {
+        avifDiagnosticsPrintf(&encoder->diag,
+                              "avifEncoder.width/height %ux%u must exactly match the coded size %ux%u of the last layer",
                               encoder->width,
                               encoder->height,
                               firstCell->width,
@@ -1654,10 +1686,23 @@ static avifResult avifEncoderValidateDisplaySizeOverride(avifEncoder * encoder, 
 
     if ((encoder->data->items.count > 0) && (encoder->extraLayerCount > 0) &&
         !avifImageHasEquivalentTransformProperties(firstCell, encoder->data->imageMetadata)) {
-        avifDiagnosticsPrintf(&encoder->diag, "display-size override requires 'pasp', 'clap', 'irot' and 'imir' to match across layers");
+        avifDiagnosticsPrintf(&encoder->diag,
+                              "when avifEncoder.width/height is set, 'pasp', 'clap', 'irot' and 'imir' must match across layers");
         return AVIF_RESULT_INCOMPATIBLE_IMAGE;
     }
 
+    return AVIF_RESULT_OK;
+}
+
+static avifResult avifEncoderValidateConsistentSize(avifEncoder * encoder, const avifImage * firstCell)
+{
+    if (avifEncoderSizeIsSet(encoder) || (encoder->data->items.count == 0)) {
+        return AVIF_RESULT_OK;
+    }
+    if ((firstCell->width != encoder->data->imageMetadata->width) || (firstCell->height != encoder->data->imageMetadata->height)) {
+        avifDiagnosticsPrintf(&encoder->diag, "All images must have the same width/height unless avifEncoder.width/height is set");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
     return AVIF_RESULT_OK;
 }
 
@@ -1843,7 +1888,11 @@ static avifResult avifEncoderAddImageInternal(avifEncoder * encoder,
         return AVIF_RESULT_NO_CONTENT;
     }
 
-    AVIF_CHECKRES(avifEncoderValidateDisplaySizeOverride(encoder, gridCols, gridRows, firstCell));
+    AVIF_CHECKRES(avifEncoderValidateSize(encoder, gridCols, gridRows, firstCell));
+    // Reject mixing scalingMode and adding input images of different sizes.
+    // They are different ways the achieve the same result, so mixing them
+    // creates confusion without providing any benefit.
+    AVIF_CHECKRES(avifEncoderValidateConsistentSize(encoder, firstCell));
 
     AVIF_CHECKRES(avifValidateGrid(gridCols, gridRows, cellImages, /*validateGainMap=*/AVIF_FALSE, &encoder->diag));
 
@@ -1975,7 +2024,7 @@ static avifResult avifEncoderAddImageInternal(avifEncoder * encoder,
     if (encoder->data->items.count == 0) {
         // Make a copy of the first image's metadata (sans pixels) for future writing/validation
         AVIF_CHECKRES(avifImageCopy(encoder->data->imageMetadata, firstCell, 0));
-        if (avifEncoderUsesDisplaySizeOverride(encoder)) {
+        if (avifEncoderSizeIsSet(encoder)) {
             encoder->data->imageMetadata->width = encoder->width;
             encoder->data->imageMetadata->height = encoder->height;
         }

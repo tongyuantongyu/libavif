@@ -82,13 +82,10 @@ static avifResult rav1eCodecEncodeImage(avifCodec * codec,
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
 
-    // rav1e does not support overriding maximum frame width/height in sequence header
+    // rav1e does not support encoding layered image.
     if (encoder->width || encoder->height) {
-        avifDiagnosticsPrintf(codec->diag, "rav1e does not support display-size override");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
-
-    // rav1e does not support encoding layered image.
     if (encoder->extraLayerCount > 0) {
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }

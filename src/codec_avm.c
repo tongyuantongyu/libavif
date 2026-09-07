@@ -445,7 +445,6 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
                                       avifCodecEncodeOutput * output)
 {
     if (encoder->width || encoder->height) {
-        avifDiagnosticsPrintf(codec->diag, "AVM does not support display-size override");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
 
