@@ -47,18 +47,6 @@ pushd ${TMP_DIR}
   "${AVIFDEC}" "${ENCODED_FILE}" "${DECODED_FILE}"
   "${AVIFDEC}" --progressive "${ENCODED_FILE}" "${DECODED_FILE}"
 
-  echo "Testing manual layered encoding with display-size override and mixed input sizes"
-  "${AVIFENC}" -s 8 --layered --display-size 768x512 \
-    "${INPUT_SMALL_Y4M}" "${INPUT_Y4M}" -o "${ENCODED_FILE}"
-  "${AVIFDEC}" --info "${ENCODED_FILE}" > "${INFO_FILE}"
-  grep -F "[768x512]" "${INFO_FILE}"
-  "${AVIFDEC}" "${ENCODED_FILE}" "${DECODED_FILE}"
-  "${AVIFDEC}" --progressive "${ENCODED_FILE}" "${DECODED_FILE}"
-
-  echo "Testing display-size override smaller than an input layer"
-  "${AVIFENC}" -s 8 --layered --display-size 384x256 \
-    "${INPUT_SMALL_Y4M}" "${INPUT_Y4M}" -o "${ENCODED_FILE}" && exit 1
-
   # libavif relies on libyuv to do scaling
   echo "Testing layered encoding with frame scaling"
   if avifenc -V | grep -o "libyuv : available" --quiet; then
@@ -68,6 +56,22 @@ pushd ${TMP_DIR}
       "${AVIFDEC}" --progressive "${ENCODED_FILE}" "${DECODED_FILE}"
     done
   fi
+
+  echo "Testing manual layered encoding with pre-scaled input"
+  "${AVIFENC}" -s 8 --layered \
+    "${INPUT_SMALL_Y4M}" "${INPUT_Y4M}" -o "${ENCODED_FILE}"
+  "${AVIFDEC}" --info "${ENCODED_FILE}" > "${INFO_FILE}"
+  grep -F "[768x512]" "${INFO_FILE}"
+  "${AVIFDEC}" "${ENCODED_FILE}" "${DECODED_FILE}"
+  "${AVIFDEC}" --progressive "${ENCODED_FILE}" "${DECODED_FILE}"
+
+  echo "Testing an earlier layer larger than the last layer"
+  "${AVIFENC}" -s 8 --layered \
+    "${INPUT_Y4M}" "${INPUT_SMALL_Y4M}" -o "${ENCODED_FILE}" && exit 1
+
+  echo "Testing layered encoding with pre-scaled input and frame scaling (rejected)"
+  "${AVIFENC}" -s 8 --layered --scaling-mode:u 1/2 \
+    "${INPUT_SMALL_Y4M}" "${INPUT_Y4M}" -o "${ENCODED_FILE}" && exit 1
 
   echo "Testing too few layers"
   "${AVIFENC}" -s 8 --layered -q:u 60 "${INPUT_Y4M}" -o "${ENCODED_FILE}" && exit 1
