@@ -1,4 +1,8 @@
 #include <array>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -6,6 +10,7 @@
 #include "avif/codec.h"
 #include "avif/avif.h"
 #include "codec_wrapper.h"
+#include "film_grain.h"
 #include "gtest/gtest.h"
 #include "gtest_helpers.h"
 
@@ -495,6 +500,285 @@ TEST(NvencIntegrationTest, RejectsSecondStillImageOnSameCodecInstance)
     avifFree(codec);
     avifEncoderDestroy(encoder);
     avifImageDestroy(image);
+}
+
+TEST(NvencIntegrationTest, OutputUsesReducedStillPictureHeader)
+{
+    ASSERT_EQ(avifNvencRegister(), AVIF_RESULT_OK);
+    const std::string pool_id = testutil::MakeUniquePoolId("nvenc-reduced-header");
+    testutil::PoolGuard pool_guard(pool_id);
+
+    avifDiagnostics diag = {};
+    avifResult result = testutil::CreateOmniPool(pool_id, /*max_sessions=*/1, /*max_width=*/512, /*max_height=*/384, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+
+    avifImage * image = avifImageCreate(250, 130, 8, AVIF_PIXEL_FORMAT_YUV420);
+    ASSERT_NE(image, nullptr);
+    ASSERT_EQ(testutil::FillImage(image, /*with_alpha=*/false), AVIF_RESULT_OK);
+
+    avifEncoder * encoder = avifEncoderCreate();
+    ASSERT_NE(encoder, nullptr);
+    encoder->maxThreads = 1;
+    ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder, AVIF_NVENC_OPTION_POOL, pool_id.c_str()), AVIF_RESULT_OK) << encoder->diag.error;
+
+    avifCodec * codec = create_codec();
+    ASSERT_NE(codec, nullptr);
+    codec->diag = &diag;
+    avifCodecEncodeOutput * output = avifCodecEncodeOutputCreate();
+    ASSERT_NE(output, nullptr);
+
+    result = codec->encodeImage(codec, encoder, image, AVIF_FALSE, 0, 0, 80, 0, AVIF_TRUE, AVIF_ADD_IMAGE_FLAG_SINGLE, output);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+    ASSERT_EQ(output->samples.count, 1u);
+
+    // Find the sequence header OBU and check still_picture and reduced_still_picture_header.
+    const avifRWData & data = output->samples.sample[0].data;
+    bool found_sequence_header = false;
+    for (size_t pos = 0; pos < data.size;) {
+        const uint8_t header = data.data[pos++];
+        const int type = (header >> 3) & 0xf;
+        ASSERT_TRUE(header & 2) << "OBU without size field";
+        if (header & 4) {
+            ++pos; // extension header
+        }
+        size_t obu_size = 0;
+        for (int shift = 0; pos < data.size; shift += 7) {
+            const uint8_t byte = data.data[pos++];
+            obu_size |= static_cast<size_t>(byte & 0x7f) << shift;
+            if (!(byte & 0x80)) {
+                break;
+            }
+        }
+        ASSERT_LE(pos + obu_size, data.size);
+        if (type == 1) {
+            found_sequence_header = true;
+            ASSERT_GT(obu_size, 0u);
+            EXPECT_EQ((data.data[pos] >> 3) & 3, 3) << "still_picture and reduced_still_picture_header must both be set";
+        }
+        pos += obu_size;
+    }
+    EXPECT_TRUE(found_sequence_header);
+
+    avifCodecEncodeOutputDestroy(output);
+    codec->destroyInternal(codec);
+    avifFree(codec);
+    avifEncoderDestroy(encoder);
+    avifImageDestroy(image);
+}
+
+namespace
+{
+
+std::string WriteTempFile(const std::string & name, const std::string & content)
+{
+    const std::string path = (std::filesystem::temp_directory_path() / name).string();
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << content;
+    return path;
+}
+
+const char kGrainEntry[] =
+    "E 0 1000000 1 7391 1\n"
+    "\tp 0 6 0 8 0 1 128 192 256 128 192 256\n"
+    "\tsY 2  0 96 255 96\n"
+    "\tsCb 0\n"
+    "\tsCr 0\n"
+    "\tcY\n"
+    "\tcCb 0\n"
+    "\tcCr 0\n";
+
+} // namespace
+
+TEST(NvencFilmGrainTableTest, ParsesEntryCoveringTimeZero)
+{
+    const std::string path = WriteTempFile("avif_nvenc_grain_parse.tbl",
+                                           std::string("filmgrn1\n") +
+                                               "E -5 0 1 1 1\n"
+                                               "\tp 0 6 0 8 0 0 0 0 0 0 0 0\n\tsY 0 \n\tsCb 0\n\tsCr 0\n\tcY\n\tcCb 0\n\tcCr 0\n" +
+                                               kGrainEntry + "E 1000000 2000000 0 1 0\n");
+    std::optional<film_grain_params> params;
+    uint16_t seed = 0;
+    avifDiagnostics diag = {};
+    ASSERT_EQ(load_film_grain_table(path, &params, &seed, &diag), AVIF_RESULT_OK) << diag.error;
+    ASSERT_TRUE(params.has_value());
+    EXPECT_EQ(params->num_y_points, 2);
+    EXPECT_EQ(params->scaling_points_y[1][0], 255);
+    EXPECT_EQ(params->scaling_points_y[1][1], 96);
+    EXPECT_TRUE(params->overlap_flag);
+    EXPECT_EQ(params->cb_offset, 256);
+    EXPECT_EQ(seed, 7391);
+
+    NV_ENC_FILM_GRAIN_PARAMS_AV1 nv;
+    params->to_nvenc(&nv);
+    EXPECT_EQ(nv.applyGrain, 1u);
+    EXPECT_EQ(nv.numYPoints, 2u);
+    EXPECT_EQ(nv.arCoeffsCbPlus128[0], 128);
+    std::filesystem::remove(path);
+}
+
+TEST(NvencFilmGrainTableTest, ReloadsModifiedFileAndReportsErrors)
+{
+    const std::string path = WriteTempFile("avif_nvenc_grain_reload.tbl", std::string("filmgrn1\n") + kGrainEntry);
+    std::optional<film_grain_params> params;
+    uint16_t seed = 0;
+    avifDiagnostics diag = {};
+    ASSERT_EQ(load_film_grain_table(path, &params, &seed, &diag), AVIF_RESULT_OK) << diag.error;
+    ASSERT_TRUE(params.has_value());
+
+    // apply_grain == 0 for the covering entry means no film grain. The file size changes, so the cache is invalidated.
+    WriteTempFile("avif_nvenc_grain_reload.tbl", "filmgrn1\nE 0 10 0 1 0\n");
+    ASSERT_EQ(load_film_grain_table(path, &params, &seed, &diag), AVIF_RESULT_OK) << diag.error;
+    EXPECT_FALSE(params.has_value());
+
+    WriteTempFile("avif_nvenc_grain_reload.tbl", "filmgrn1\nE 5 1000 1 1 0\n");
+    diag = {};
+    EXPECT_NE(load_film_grain_table(path, &params, &seed, &diag), AVIF_RESULT_OK);
+    EXPECT_TRUE(testutil::DiagnosticContains(diag, "no entry covers time 0"));
+
+    diag = {};
+    EXPECT_NE(load_film_grain_table(path + ".missing", &params, &seed, &diag), AVIF_RESULT_OK);
+    std::filesystem::remove(path);
+}
+
+TEST(NvencIntegrationTest, AppliesFilmGrainTableAndSessionReturnsToNoGrain)
+{
+    ASSERT_EQ(avifNvencRegister(), AVIF_RESULT_OK);
+    const std::string pool_id = testutil::MakeUniquePoolId("nvenc-grain");
+    testutil::PoolGuard pool_guard(pool_id);
+
+    avifDiagnostics diag = {};
+    avifResult result = testutil::CreateOnDemandPool(pool_id, /*max_sessions=*/1, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+
+    const std::string path = WriteTempFile("avif_nvenc_grain_encode.tbl", std::string("filmgrn1\n") + kGrainEntry);
+
+    testutil::EncodeOptions options;
+    options.pool_id = pool_id;
+    options.quality = 90;
+
+    double psnr_plain = 0, psnr_grain = 0, psnr_plain_again = 0;
+    avifRWData output = AVIF_DATA_EMPTY;
+    result = testutil::EncodeWithOptions(options, &diag, &output);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+    ASSERT_EQ(testutil::GetDecodedImagePsnr(output, options, &psnr_plain, &diag), AVIF_RESULT_OK) << diag.error;
+    avifRWDataFree(&output);
+
+    options.film_grain_table = path;
+    diag = {};
+    result = testutil::EncodeWithOptions(options, &diag, &output);
+    ASSERT_EQ(result, AVIF_RESULT_OK) << diag.error;
+    ASSERT_EQ(testutil::GetDecodedImagePsnr(output, options, &psnr_grain, &diag), AVIF_RESULT_OK) << diag.error;
+
+    // A second request in the same session with the same config reuses the cached table. NVENC advances its own
+    // film grain seed for every frame, but the seed from the table is patched into the bitstream, so the
+    // output must be identical.
+    avifRWData output_again = AVIF_DATA_EMPTY;
+    diag = {};
+    result = testutil::EncodeWithOptions(options, &diag, &output_again);
+    ASSERT_EQ(result, AVIF_RESULT_OK) << diag.error;
+    EXPECT_EQ(output.size, output_again.size);
+    EXPECT_TRUE(output.size == output_again.size && std::memcmp(output.data, output_again.data, output.size) == 0);
+    avifRWDataFree(&output_again);
+    avifRWDataFree(&output);
+
+    options.film_grain_table.reset();
+    diag = {};
+    result = testutil::EncodeWithOptions(options, &diag, &output);
+    ASSERT_EQ(result, AVIF_RESULT_OK) << diag.error;
+    ASSERT_EQ(testutil::GetDecodedImagePsnr(output, options, &psnr_plain_again, &diag), AVIF_RESULT_OK) << diag.error;
+    avifRWDataFree(&output);
+
+    EXPECT_LT(psnr_grain, psnr_plain - 3.0);
+    EXPECT_NEAR(psnr_plain_again, psnr_plain, 0.5);
+    std::filesystem::remove(path);
+}
+
+TEST(NvencFilmGrainPresetTest, ParametersAreValidForAllStrengths)
+{
+    for (const bool limited_range : { true, false }) {
+        for (int strength = 1; strength <= kMaxDitherGrainStrength; ++strength) {
+            SCOPED_TRACE(testing::Message() << "strength " << strength << ", limited " << limited_range);
+            const film_grain_params p = make_dither_grain(strength, limited_range);
+            EXPECT_EQ(p.clip_to_restricted_range, limited_range);
+            ASSERT_GT(p.num_y_points, 1);
+            for (int i = 1; i < p.num_y_points; ++i) {
+                EXPECT_GT(p.scaling_points_y[i][0], p.scaling_points_y[i - 1][0]);
+            }
+            // Zero at the ends of the signal range, so black and white are not shifted by clipped noise.
+            EXPECT_EQ(p.scaling_points_y[0][1], 0);
+            EXPECT_EQ(p.scaling_points_y[p.num_y_points - 1][1], 0);
+            if (strength == 1) {
+                EXPECT_EQ(p.num_cb_points, 0);
+                EXPECT_EQ(p.num_cr_points, 0);
+            } else {
+                EXPECT_EQ(p.num_cb_points, 2);
+                EXPECT_EQ(p.num_cr_points, 2);
+                EXPECT_GE(p.scaling_points_cb[0][1], 19); // 0.30 LSBs; lower values are lost to rounding
+            }
+            NV_ENC_FILM_GRAIN_PARAMS_AV1 nv;
+            p.to_nvenc(&nv);
+            EXPECT_EQ(nv.grainScalingMinus8, 3u);
+            EXPECT_EQ(nv.arCoeffLag, 0u);
+        }
+    }
+    // Strength increases the luma noise.
+    EXPECT_LT(make_dither_grain(1, true).scaling_points_y[2][1], make_dither_grain(8, true).scaling_points_y[2][1]);
+}
+
+TEST(NvencIntegrationTest, FilmGrainDitherStrengthOptionIsValidated)
+{
+    ASSERT_EQ(avifNvencRegister(), AVIF_RESULT_OK);
+    const std::string pool_id = testutil::MakeUniquePoolId("nvenc-dither-option");
+    testutil::PoolGuard pool_guard(pool_id);
+
+    avifDiagnostics diag = {};
+    avifResult result = testutil::CreateOnDemandPool(pool_id, /*max_sessions=*/1, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+
+    testutil::EncodeOptions options;
+    options.pool_id = pool_id;
+    options.film_grain_dither_strength = "25";
+    diag = {};
+    EXPECT_EQ(testutil::EncodeWithOptions(options, &diag), AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION);
+    EXPECT_TRUE(testutil::DiagnosticContains(diag, "film-grain-dither-strength")) << diag.error;
+
+    options.film_grain_dither_strength = "2";
+    options.film_grain_table = "table-that-is-never-read.tbl";
+    diag = {};
+    EXPECT_EQ(testutil::EncodeWithOptions(options, &diag), AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION);
+    EXPECT_TRUE(testutil::DiagnosticContains(diag, "cannot be combined")) << diag.error;
+}
+
+TEST(NvencIntegrationTest, EncodesWithFilmGrainDither)
+{
+    ASSERT_EQ(avifNvencRegister(), AVIF_RESULT_OK);
+    const std::string pool_id = testutil::MakeUniquePoolId("nvenc-dither");
+    testutil::PoolGuard pool_guard(pool_id);
+
+    avifDiagnostics diag = {};
+    avifResult result = testutil::CreateOnDemandPool(pool_id, /*max_sessions=*/1, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+
+    testutil::EncodeOptions options;
+    options.pool_id = pool_id;
+    options.quality = 90;
+    double psnr_plain = 0;
+    avifRWData output = AVIF_DATA_EMPTY;
+    ASSERT_NVENC_OK_OR_SKIP(testutil::EncodeWithOptions(options, &diag, &output), diag);
+    ASSERT_EQ(testutil::GetDecodedImagePsnr(output, options, &psnr_plain, &diag), AVIF_RESULT_OK) << diag.error;
+    avifRWDataFree(&output);
+
+    for (const char * strength : { "1", "4", "8", "24" }) {
+        options.film_grain_dither_strength = strength;
+        diag = {};
+        ASSERT_EQ(testutil::EncodeWithOptions(options, &diag, &output), AVIF_RESULT_OK) << diag.error;
+        double psnr = 0;
+        ASSERT_EQ(testutil::GetDecodedImagePsnr(output, options, &psnr, &diag), AVIF_RESULT_OK) << diag.error;
+        avifRWDataFree(&output);
+        // The grain is noise: the decoded image gets worse, but must stay recognizable.
+        EXPECT_LT(psnr, psnr_plain) << "strength " << strength;
+        EXPECT_GT(psnr, 25.0) << "strength " << strength;
+    }
 }
 
 #undef ASSERT_NVENC_OK_OR_SKIP

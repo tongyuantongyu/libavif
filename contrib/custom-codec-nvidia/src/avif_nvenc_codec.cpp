@@ -8,6 +8,8 @@
 #include <mutex>
 #include <new>
 
+#include "avif/apps.h"
+
 #include "codec_wrapper.h"
 #include "exception.h"
 #include "runtime.h"

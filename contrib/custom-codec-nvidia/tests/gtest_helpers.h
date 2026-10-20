@@ -64,6 +64,8 @@ struct EncodeOptions
     std::string pool_id;
     std::optional<std::string> preset;
     std::optional<std::string> tuning;
+    std::optional<std::string> film_grain_table;
+    std::optional<std::string> film_grain_dither_strength;
 };
 
 avifResult CreateOnDemandPool(std::string_view pool_id, uint32_t max_sessions, avifDiagnostics * diag);

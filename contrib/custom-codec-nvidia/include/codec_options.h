@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "avif/codec.h"
+#include "film_grain.h"
 #include "nvEncodeAPI.h"
 
 namespace avif_nvenc
@@ -57,6 +58,8 @@ struct codec_options
     std::optional<int8_t> cb_qp_offset;
     std::optional<int8_t> cr_qp_offset;
     NV_ENC_SPLIT_ENCODE_MODE split_encode_mode = NV_ENC_SPLIT_AUTO_MODE;
+    std::string film_grain_table;
+    int film_grain_dither_strength = 0;
 };
 
 struct registered_pool_options
@@ -119,6 +122,7 @@ struct session_config
     std::optional<int8_t> cr_qp_offset;
     NV_ENC_SPLIT_ENCODE_MODE split_encode_mode = NV_ENC_SPLIT_AUTO_MODE;
     std::optional<content_light_level> clli;
+    std::optional<film_grain_params> film_grain;
 
     bool operator==(const session_config & other) const;
 };
@@ -129,6 +133,7 @@ struct session_request
     uint32_t depth = 8;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
     session_config config;
+    uint16_t film_grain_seed = 0; // Valid if config.film_grain is set. Not part of the config: NVENC ignores it.
 };
 
 const char * pool_mode_to_string(pool_mode mode);

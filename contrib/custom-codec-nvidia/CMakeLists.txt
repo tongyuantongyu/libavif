@@ -17,7 +17,7 @@ if(AVIF_BUILD_CUSTOM_CODEC_NVENC)
     enable_language(CXX)
     find_package(nvenc)
 
-    set(CUSTOM_CODEC_NVENC_SRC src/exception.cpp src/dyn_loader.cpp src/cuda_driver.cpp src/nvenc.cpp src/codec_options.cpp
+    set(CUSTOM_CODEC_NVENC_SRC src/exception.cpp src/dyn_loader.cpp src/cuda_driver.cpp src/nvenc.cpp src/codec_options.cpp src/obu_rewrite.cpp src/film_grain.cpp
                                src/scheduler.cpp src/runtime.cpp src/session.cpp src/codec_wrapper.cpp src/avif_nvenc_codec.cpp)
 
     add_library(custom-codec-nvenc_obj OBJECT ${CUSTOM_CODEC_NVENC_SRC})

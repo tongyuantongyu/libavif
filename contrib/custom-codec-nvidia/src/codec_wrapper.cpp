@@ -5,10 +5,13 @@
 
 #include <cstring>
 #include <new>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "codec_options.h"
 #include "exception.h"
+#include "obu_rewrite.h"
 #include "runtime.h"
 #include "session.h"
 
@@ -69,7 +72,18 @@ avifResult nvenc_codec_encode_image(avifCodec * codec,
         return result;
     }
 
-    result = avifCodecEncodeOutputAddSample(output, encoded.bytes.data(), encoded.bytes.size(), encoded.sync);
+    // NVENC cannot emit reduced_still_picture_header. Each bitstream holds exactly one frame, so rewrite it.
+    // The sequence header's max frame size is the session's bucket size; use the actual image size.
+    // NVENC chooses its own film grain seed; use the one from the table instead.
+    std::vector<uint8_t> reduced;
+    const std::optional<uint16_t> grain_seed =
+        request.config.film_grain.has_value() ? std::optional(request.film_grain_seed) : std::nullopt;
+    result = rewrite_to_reduced_still_picture(encoded.bytes, request.config.encode_width, request.config.encode_height, grain_seed, &reduced, codec->diag);
+    if (result != AVIF_RESULT_OK) {
+        return result;
+    }
+
+    result = avifCodecEncodeOutputAddSample(output, reduced.data(), reduced.size(), encoded.sync);
     if (result != AVIF_RESULT_OK) {
         return result;
     }

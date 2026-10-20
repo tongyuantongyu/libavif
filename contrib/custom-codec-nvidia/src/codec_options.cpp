@@ -334,10 +334,27 @@ avifResult parse_codec_options_internal(const avifCodecSpecificOptions * cs_opti
                 set_diagnostic(diag, "Invalid NVENC split-encode-mode option: {}", value);
                 return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
             }
+        } else if (key == AVIF_NVENC_OPTION_FILM_GRAIN_TABLE) {
+            if (value.empty()) {
+                set_diagnostic(diag, "Invalid NVENC film-grain-table option: empty path");
+                return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+            }
+            options->film_grain_table = std::string(value);
+        } else if (key == AVIF_NVENC_OPTION_FILM_GRAIN_DITHER_STRENGTH) {
+            int strength = 0;
+            if (!parse_integer(value, &strength) || strength < 0 || strength > kMaxDitherGrainStrength) {
+                set_diagnostic(diag, "Invalid NVENC film-grain-dither-strength option: {} (expected 0 to {})", value, kMaxDitherGrainStrength);
+                return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+            }
+            options->film_grain_dither_strength = strength;
         } else {
             set_diagnostic(diag, "Unknown NVENC codec-specific option: {}", option.key ? option.key : "<null>");
             return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
         }
+    }
+    if (options->film_grain_dither_strength > 0 && !options->film_grain_table.empty()) {
+        set_diagnostic(diag, "NVENC film-grain-dither-strength cannot be combined with film-grain-table");
+        return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
     }
     if (options->aq_strength.has_value()) {
         if (options->spatial_aq_was_explicit && !options->spatial_aq) {
@@ -395,7 +412,8 @@ bool session_config::operator==(const session_config & other) const
            min_part_size == other.min_part_size && max_part_size == other.max_part_size &&
            y_dc_qp_offset == other.y_dc_qp_offset && u_dc_qp_offset == other.u_dc_qp_offset &&
            v_dc_qp_offset == other.v_dc_qp_offset && cb_qp_offset == other.cb_qp_offset &&
-           cr_qp_offset == other.cr_qp_offset && split_encode_mode == other.split_encode_mode && clli == other.clli;
+           cr_qp_offset == other.cr_qp_offset && split_encode_mode == other.split_encode_mode && clli == other.clli &&
+           film_grain == other.film_grain;
 }
 
 const char * pool_mode_to_string(pool_mode mode)
@@ -480,6 +498,17 @@ avifResult build_session_request(avifEncoder * encoder,
     request->config.cb_qp_offset = options.cb_qp_offset;
     request->config.cr_qp_offset = options.cr_qp_offset;
     request->config.split_encode_mode = options.split_encode_mode;
+    request->config.film_grain.reset();
+    if (!request->config.is_alpha && !options.film_grain_table.empty()) {
+        const avifResult grain_result = load_film_grain_table(options.film_grain_table, &request->config.film_grain, &request->film_grain_seed, diag);
+        if (grain_result != AVIF_RESULT_OK) {
+            return grain_result;
+        }
+    }
+    if (!request->config.is_alpha && options.film_grain_dither_strength > 0) {
+        request->config.film_grain = make_dither_grain(options.film_grain_dither_strength, image->yuvRange == AVIF_RANGE_LIMITED);
+        request->film_grain_seed = kDitherGrainSeed;
+    }
     if (!request->config.is_alpha && image_has_clli(image)) {
         request->config.clli = clli_for_image(image);
     } else {

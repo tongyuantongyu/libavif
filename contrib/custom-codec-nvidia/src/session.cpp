@@ -460,7 +460,10 @@ struct nvenc_session::impl
         monochrome_supported = (capability(NV_ENC_CAPS_SUPPORT_MONOCHROME) != 0);
     }
 
-    void build_encoder_state(const session_config & config, NV_ENC_CONFIG * config_out, NV_ENC_INITIALIZE_PARAMS * init_out) const
+    void build_encoder_state(const session_config & config,
+                             NV_ENC_CONFIG * config_out,
+                             NV_ENC_INITIALIZE_PARAMS * init_out,
+                             NV_ENC_FILM_GRAIN_PARAMS_AV1 * film_grain_out) const
     {
         NV_ENC_PRESET_CONFIG preset_config = { NV_ENC_PRESET_CONFIG_VER, 0, { NV_ENC_CONFIG_VER } };
         check_status("nvEncGetEncodePresetConfigEx",
@@ -530,6 +533,15 @@ struct nvenc_session::impl
         av1_config.outputMaxCll = config.clli.has_value() ? 1u : 0u;
         av1_config.outputBitDepth = (key.depth > 8) ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
         av1_config.inputBitDepth = av1_config.outputBitDepth;
+        if (config.film_grain.has_value()) {
+            // The pointee must stay valid for as long as the encoder may reference the config.
+            config.film_grain->to_nvenc(film_grain_out);
+            av1_config.enableFilmGrainParams = 1;
+            av1_config.filmGrainParams = film_grain_out;
+        } else {
+            av1_config.enableFilmGrainParams = 0;
+            av1_config.filmGrainParams = nullptr;
+        }
 
         *init_out = { NV_ENC_INITIALIZE_PARAMS_VER };
         init_out->encodeGUID = NV_ENC_CODEC_AV1_GUID;
@@ -553,7 +565,7 @@ struct nvenc_session::impl
 
     void initialize_encoder(const session_config & config)
     {
-        build_encoder_state(config, &encode_config, &initialize_params);
+        build_encoder_state(config, &encode_config, &initialize_params, &film_grain_params);
         check_status("nvEncInitializeEncoder", api.nvEncInitializeEncoder(encoder, &initialize_params));
     }
 
@@ -565,7 +577,8 @@ struct nvenc_session::impl
 
         NV_ENC_CONFIG updated_encode_config = {};
         NV_ENC_INITIALIZE_PARAMS updated_initialize_params = {};
-        build_encoder_state(config, &updated_encode_config, &updated_initialize_params);
+        NV_ENC_FILM_GRAIN_PARAMS_AV1 updated_film_grain_params = {};
+        build_encoder_state(config, &updated_encode_config, &updated_initialize_params, &updated_film_grain_params);
 
         NV_ENC_RECONFIGURE_PARAMS reconfigure_params = { NV_ENC_RECONFIGURE_PARAMS_VER };
         reconfigure_params.reInitEncodeParams = updated_initialize_params;
@@ -574,6 +587,10 @@ struct nvenc_session::impl
 
         check_status("nvEncReconfigureEncoder", api.nvEncReconfigureEncoder(encoder, &reconfigure_params));
         encode_config = updated_encode_config;
+        film_grain_params = updated_film_grain_params;
+        if (encode_config.encodeCodecConfig.av1Config.filmGrainParams) {
+            encode_config.encodeCodecConfig.av1Config.filmGrainParams = &film_grain_params;
+        }
         initialize_params = updated_initialize_params;
         initialize_params.encodeConfig = &encode_config;
         active_config = config;
@@ -1072,6 +1089,7 @@ struct nvenc_session::impl
     void * encoder = nullptr;
     NV_ENC_INITIALIZE_PARAMS initialize_params = {};
     NV_ENC_CONFIG encode_config = {};
+    NV_ENC_FILM_GRAIN_PARAMS_AV1 film_grain_params = {};
     std::vector<buffer_slot> slots;
     size_t next_slot = 0;
     uint32_t frame_index = 0;

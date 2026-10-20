@@ -7,18 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "avif/apps.h"
-
-#ifdef _WIN32
-#define AVIF_NVENC_HELPER_EXPORT __declspec(dllexport)
-#define AVIF_NVENC_HELPER_IMPORT __declspec(dllimport)
-#elif defined(__GNUC__) && __GNUC__ >= 4
-#define AVIF_NVENC_HELPER_EXPORT __attribute__((visibility("default")))
-#define AVIF_NVENC_HELPER_IMPORT
-#else
-#define AVIF_NVENC_HELPER_EXPORT
-#define AVIF_NVENC_HELPER_IMPORT
-#endif
+#include "avif/avif.h"
 
 #if defined(AVIF_NVENC_DLL) && defined(AVIF_NVENC_USING_STATIC_LIBS)
 #error "Your target is linking against avif_nvenc and custom-codec-nvenc_internal: only one should be chosen"
@@ -26,9 +15,9 @@
 
 #if defined(AVIF_NVENC_DLL)
 #if defined(AVIF_NVENC_BUILDING_SHARED_LIBS)
-#define AVIF_NVENC_API AVIF_NVENC_HELPER_EXPORT
+#define AVIF_NVENC_API AVIF_HELPER_EXPORT
 #else
-#define AVIF_NVENC_API AVIF_NVENC_HELPER_IMPORT
+#define AVIF_NVENC_API AVIF_HELPER_IMPORT
 #endif
 #else
 #define AVIF_NVENC_API
@@ -51,6 +40,11 @@
 #define AVIF_NVENC_OPTION_CB_QP_OFFSET "cb-qp-offset"
 #define AVIF_NVENC_OPTION_CR_QP_OFFSET "cr-qp-offset"
 #define AVIF_NVENC_OPTION_SPLIT_ENCODE_MODE "split-encode-mode"
+// Path to an AOM film grain table file. Only the entry covering time 0 is used.
+#define AVIF_NVENC_OPTION_FILM_GRAIN_TABLE "film-grain-table"
+// 0 (default, off) to 24. Adds a preset film grain tuned to hide the color banding.
+// Cannot be combined with film-grain-table.
+#define AVIF_NVENC_OPTION_FILM_GRAIN_DITHER_STRENGTH "film-grain-dither-strength"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,10 +98,6 @@ AVIF_NVENC_API avifResult avifNvencShutdownPool(const char * poolId, avifDiagnos
 
 // Returns the contrib module version string.
 AVIF_NVENC_API const char * avifNvencVersion(void);
-
-// Generic avif app hooks.
-AVIF_NVENC_API avifResult avifAppsCustomCodecSetup(avifDiagnostics * diag);
-AVIF_NVENC_API avifResult avifAppsCustomCodecShutdown(avifDiagnostics * diag);
 
 #ifdef __cplusplus
 } // extern "C"

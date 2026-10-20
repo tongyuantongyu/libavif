@@ -4,12 +4,9 @@
 #ifndef AVIF_CONTRIB_CUSTOM_CODEC_NVIDIA_SESSION_H
 #define AVIF_CONTRIB_CUSTOM_CODEC_NVIDIA_SESSION_H
 
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "avif/codec.h"
 #include "codec_options.h"
 #include "cuda_stub.h"
 #include "nvEncodeAPI.h"

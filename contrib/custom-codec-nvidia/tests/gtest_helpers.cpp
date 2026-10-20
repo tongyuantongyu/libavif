@@ -351,6 +351,12 @@ avifResult EncodeWithOptions(const EncodeOptions & options, avifDiagnostics * di
     if (result == AVIF_RESULT_OK) {
         result = SetCodecOption(encoder, AVIF_NVENC_OPTION_TUNING, options.tuning, diag);
     }
+    if (result == AVIF_RESULT_OK) {
+        result = SetCodecOption(encoder, AVIF_NVENC_OPTION_FILM_GRAIN_TABLE, options.film_grain_table, diag);
+    }
+    if (result == AVIF_RESULT_OK) {
+        result = SetCodecOption(encoder, AVIF_NVENC_OPTION_FILM_GRAIN_DITHER_STRENGTH, options.film_grain_dither_strength, diag);
+    }
     if (result != AVIF_RESULT_OK) {
         avifEncoderDestroy(encoder);
         avifImageDestroy(image);
