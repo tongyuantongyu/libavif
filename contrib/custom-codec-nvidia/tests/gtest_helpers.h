@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include "avif/avif.h"
+#include "avif/apps.h"
 #include "avif_nvenc_codec.h"
 
 namespace avif_nvenc::testutil

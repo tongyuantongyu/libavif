@@ -225,6 +225,7 @@ avifResult CreateBenchmarkSource(BenchmarkConfig * config, ImagePtr * image, avi
                                              AVIF_FALSE,
                                              AVIF_FALSE,
                                              AVIF_FALSE,
+                                             AVIF_FALSE,
                                              AVIF_TRUE,
                                              AVIF_DEFAULT_IMAGE_SIZE_LIMIT,
                                              image->get(),

@@ -194,6 +194,11 @@ avifResult avifAppsCustomCodecSetup(avifDiagnostics * diag)
     if (result == AVIF_RESULT_OK) {
         g_apps_setup_complete = true;
     }
+
+    fprintf(stderr, "WARNING: "
+                    "Use NVENC codec via avifenc only for quality evaluation. "
+                    "It's specifically not meant to evaluate the encoding speed. "
+                    "Use the API instead for high performance batched image encoding.\n");
     return result;
 }
 
