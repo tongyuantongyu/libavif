@@ -30,7 +30,8 @@
 #define AVIF_NVENC_OPTION_PRESET "preset"
 #define AVIF_NVENC_OPTION_TUNING "tuning"
 #define AVIF_NVENC_OPTION_QP "qp" // In NVENC AV1 encoder, qp range is 0-255
-#define AVIF_NVENC_OPTION_AQ "aq"
+#define AVIF_NVENC_OPTION_AQ "aq" // Enabled by default; 0 disables spatial AQ.
+// auto (default): QP-dependent policy; 0: driver selection; 1-15: fixed strength. Implies AQ.
 #define AVIF_NVENC_OPTION_AQ_STRENGTH "aq-strength"
 #define AVIF_NVENC_OPTION_MIN_PART_SIZE "min-part-size"
 #define AVIF_NVENC_OPTION_MAX_PART_SIZE "max-part-size"
@@ -39,6 +40,8 @@
 #define AVIF_NVENC_OPTION_V_DC_QP_OFFSET "v-dc-qp-offset"
 #define AVIF_NVENC_OPTION_CB_QP_OFFSET "cb-qp-offset"
 #define AVIF_NVENC_OPTION_CR_QP_OFFSET "cr-qp-offset"
+// Setting any of the five QP offsets disables automatic tuning of all five;
+// unspecified offsets then retain the NVENC preset's values.
 #define AVIF_NVENC_OPTION_SPLIT_ENCODE_MODE "split-encode-mode"
 // Path to an AOM film grain table file. Only the entry covering time 0 is used.
 #define AVIF_NVENC_OPTION_FILM_GRAIN_TABLE "film-grain-table"

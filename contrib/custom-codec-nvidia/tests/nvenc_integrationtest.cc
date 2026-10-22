@@ -5,11 +5,14 @@
 #include <optional>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <thread>
+#include <utility>
 
 #include "avif/codec.h"
 #include "avif/avif.h"
 #include "codec_wrapper.h"
+#include "codec_options.h"
 #include "film_grain.h"
 #include "gtest/gtest.h"
 #include "gtest_helpers.h"
@@ -46,6 +49,146 @@ struct ThreadedResult
     avifResult result = AVIF_RESULT_OK;
     avifDiagnostics diag = {};
 };
+
+TEST(NvencOptionsTest, AutomaticAqStrength)
+{
+    for (const char * value : { "auto", "AUTO", "0", "1", "15", "-1", "16", "invalid" }) {
+        SCOPED_TRACE(value);
+        std::unique_ptr<avifEncoder, decltype(&avifEncoderDestroy)> encoder(avifEncoderCreate(), avifEncoderDestroy);
+        std::unique_ptr<avifImage, decltype(&avifImageDestroy)> image(avifImageCreate(64, 64, 8, AVIF_PIXEL_FORMAT_YUV420),
+                                                                  avifImageDestroy);
+        ASSERT_NE(encoder, nullptr);
+        ASSERT_NE(image, nullptr);
+        ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), AVIF_NVENC_OPTION_AQ_STRENGTH, value), AVIF_RESULT_OK);
+        session_request request;
+        avifDiagnostics diag = {};
+        const avifResult result = build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 50,
+                                                        AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag);
+        const bool valid = std::strcmp(value, "-1") && std::strcmp(value, "16") && std::strcmp(value, "invalid");
+        if (!valid) {
+            EXPECT_EQ(result, AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION);
+            continue;
+        }
+        ASSERT_EQ(result, AVIF_RESULT_OK) << diag.error;
+        EXPECT_TRUE(request.config.spatial_aq);
+        ASSERT_TRUE(request.config.aq_strength.has_value());
+        const int expected = !std::strcmp(value, "0") ? 0 : !std::strcmp(value, "1") ? 1 : 15;
+        EXPECT_EQ(request.config.aq_strength.value(), expected);
+        ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), AVIF_NVENC_OPTION_AQ, "0"), AVIF_RESULT_OK);
+        EXPECT_EQ(build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 50,
+                                        AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag),
+                  AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION);
+    }
+}
+
+TEST(NvencOptionsTest, DefaultAqUsesRequestedQp)
+{
+    std::unique_ptr<avifEncoder, decltype(&avifEncoderDestroy)> encoder(avifEncoderCreate(), avifEncoderDestroy);
+    std::unique_ptr<avifImage, decltype(&avifImageDestroy)> image(avifImageCreate(64, 64, 8, AVIF_PIXEL_FORMAT_YUV420),
+                                                              avifImageDestroy);
+    const std::array<std::pair<int, int>, 8> cases = {
+        { { 0, 2 }, { 16, 2 }, { 32, 4 }, { 64, 8 }, { 80, 11 }, { 96, 13 }, { 128, 15 }, { 255, 15 } }
+    };
+    for (const auto [qp, strength] : cases) {
+        SCOPED_TRACE(qp);
+        const std::string value = std::to_string(qp);
+        ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), AVIF_NVENC_OPTION_QP, value.c_str()), AVIF_RESULT_OK);
+        session_request request;
+        avifDiagnostics diag = {};
+        ASSERT_EQ(build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 25,
+                                        AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag), AVIF_RESULT_OK) << diag.error;
+        EXPECT_EQ(request.config.qp, qp);
+        EXPECT_TRUE(request.config.spatial_aq);
+        EXPECT_EQ(request.config.aq_strength, strength);
+        EXPECT_TRUE(request.config.y_dc_qp_offset.has_value());
+        EXPECT_TRUE(request.config.u_dc_qp_offset.has_value());
+        EXPECT_EQ(request.config.u_dc_qp_offset, request.config.v_dc_qp_offset);
+        EXPECT_EQ(request.config.cb_qp_offset, request.config.cr_qp_offset);
+    }
+}
+
+TEST(NvencOptionsTest, AnyOffsetMakesAllFiveManual)
+{
+    const std::array<const char *, 5> keys = { AVIF_NVENC_OPTION_Y_DC_QP_OFFSET,
+                                               AVIF_NVENC_OPTION_U_DC_QP_OFFSET,
+                                               AVIF_NVENC_OPTION_V_DC_QP_OFFSET,
+                                               AVIF_NVENC_OPTION_CB_QP_OFFSET,
+                                               AVIF_NVENC_OPTION_CR_QP_OFFSET };
+    for (size_t index = 0; index < keys.size(); ++index) {
+        for (const char * value : { "0", "-7" }) {
+            SCOPED_TRACE(keys[index]);
+            SCOPED_TRACE(value);
+            std::unique_ptr<avifEncoder, decltype(&avifEncoderDestroy)> encoder(avifEncoderCreate(), avifEncoderDestroy);
+            std::unique_ptr<avifImage, decltype(&avifImageDestroy)> image(avifImageCreate(64, 64, 8, AVIF_PIXEL_FORMAT_YUV420),
+                                                                      avifImageDestroy);
+            ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), keys[index], value), AVIF_RESULT_OK);
+            session_request request;
+            avifDiagnostics diag = {};
+            ASSERT_EQ(build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 50,
+                                            AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag), AVIF_RESULT_OK) << diag.error;
+            const std::array<std::optional<int8_t>, 5> offsets = { request.config.y_dc_qp_offset,
+                                                                  request.config.u_dc_qp_offset,
+                                                                  request.config.v_dc_qp_offset,
+                                                                  request.config.cb_qp_offset,
+                                                                  request.config.cr_qp_offset };
+            for (size_t i = 0; i < offsets.size(); ++i) {
+                EXPECT_EQ(offsets[i].has_value(), i == index);
+                if (i == index)
+                    EXPECT_EQ(offsets[i].value(), std::stoi(value));
+            }
+            // Manual offsets do not turn off automatic AQ strength selection.
+            EXPECT_TRUE(request.config.spatial_aq);
+            EXPECT_EQ(request.config.aq_strength, 15);
+        }
+    }
+}
+
+TEST(NvencOptionsTest, AutomaticOffsetCurveInterpolation)
+{
+    // Check the API contract at both curve knots and intermediate QPs.
+    const std::array<std::array<int, 4>, 9> cases = { {
+        { 0, 0, 0, 0 }, { 8, -4, -8, 0 }, { 16, -8, -16, 0 }, { 24, -12, -16, 0 },
+        { 48, -20, -20, 0 }, { 80, -24, -20, 0 }, { 112, -20, -16, -4 },
+        { 144, -16, -16, -12 }, { 255, -16, -16, -16 }
+    } };
+    for (const auto & values : cases) {
+        SCOPED_TRACE(values[0]);
+        std::unique_ptr<avifEncoder, decltype(&avifEncoderDestroy)> encoder(avifEncoderCreate(), avifEncoderDestroy);
+        std::unique_ptr<avifImage, decltype(&avifImageDestroy)> image(avifImageCreate(64, 64, 8, AVIF_PIXEL_FORMAT_YUV420),
+                                                                  avifImageDestroy);
+        const std::string qp = std::to_string(values[0]);
+        ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), AVIF_NVENC_OPTION_QP, qp.c_str()), AVIF_RESULT_OK);
+        session_request request;
+        avifDiagnostics diag = {};
+        ASSERT_EQ(build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 50,
+                                        AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag), AVIF_RESULT_OK) << diag.error;
+        EXPECT_EQ(request.config.y_dc_qp_offset, values[1]);
+        EXPECT_EQ(request.config.u_dc_qp_offset, values[2]);
+        EXPECT_EQ(request.config.v_dc_qp_offset, values[2]);
+        EXPECT_EQ(request.config.cb_qp_offset, values[3]);
+        EXPECT_EQ(request.config.cr_qp_offset, values[3]);
+    }
+}
+
+TEST(NvencOptionsTest, ExplicitAqDisableAndFixedStrength)
+{
+    for (const bool disabled : { false, true }) {
+        std::unique_ptr<avifEncoder, decltype(&avifEncoderDestroy)> encoder(avifEncoderCreate(), avifEncoderDestroy);
+        std::unique_ptr<avifImage, decltype(&avifImageDestroy)> image(avifImageCreate(64, 64, 8, AVIF_PIXEL_FORMAT_YUV420),
+                                                                  avifImageDestroy);
+        ASSERT_EQ(avifEncoderSetCodecSpecificOption(encoder.get(), disabled ? AVIF_NVENC_OPTION_AQ : AVIF_NVENC_OPTION_AQ_STRENGTH,
+                                                     disabled ? "0" : "7"), AVIF_RESULT_OK);
+        session_request request;
+        avifDiagnostics diag = {};
+        ASSERT_EQ(build_session_request(encoder.get(), image.get(), AVIF_FALSE, 0, 0, 50,
+                                        AVIF_ADD_IMAGE_FLAG_SINGLE, &request, &diag), AVIF_RESULT_OK) << diag.error;
+        EXPECT_EQ(request.config.spatial_aq, !disabled);
+        EXPECT_EQ(request.config.aq_strength, disabled ? 0 : 7);
+        // AQ overrides do not disable automatic offsets.
+        EXPECT_TRUE(request.config.y_dc_qp_offset.has_value());
+        EXPECT_TRUE(request.config.u_dc_qp_offset.has_value());
+    }
+}
 
 TEST(NvencIntegrationTest, RegistersCodec)
 {
@@ -104,6 +247,24 @@ TEST(NvencIntegrationTest, Encodes8BitColor)
     testutil::EncodeOptions options;
     options.pool_id = pool_id;
     options.quality = 60;
+    diag = {};
+    result = testutil::EncodeWithOptions(options, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+}
+
+TEST(NvencIntegrationTest, EncodesAllIntraUltraHighQuality)
+{
+    ASSERT_EQ(avifNvencRegister(), AVIF_RESULT_OK);
+    const std::string pool_id = testutil::MakeUniquePoolId("nvenc-uhq");
+    testutil::PoolGuard pool_guard(pool_id);
+    avifDiagnostics diag = {};
+    avifResult result = testutil::CreateOnDemandPool(pool_id, /*max_sessions=*/1, &diag);
+    ASSERT_NVENC_OK_OR_SKIP(result, diag);
+    testutil::EncodeOptions options;
+    options.pool_id = pool_id;
+    options.quality = 60;
+    options.speed = 0;
+    options.tuning = "uhq";
     diag = {};
     result = testutil::EncodeWithOptions(options, &diag);
     ASSERT_NVENC_OK_OR_SKIP(result, diag);

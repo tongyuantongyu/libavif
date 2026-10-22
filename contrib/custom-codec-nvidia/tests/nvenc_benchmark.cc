@@ -13,12 +13,14 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "argparse.hpp"
 #include "avif/avif.h"
 #include "avif_nvenc_codec.h"
 #include "avifutil.h"
+#include "codec_options.h"
 #include "gtest_helpers.h"
 
 namespace avif_nvenc
@@ -46,6 +48,8 @@ struct BenchmarkConfig
     uint32_t warmup_iterations = 1;
     std::optional<std::string> preset;
     std::optional<std::string> tuning;
+    std::vector<std::pair<std::string, std::string>> codec_options;
+    bool dry_run = false;
 };
 
 struct PhaseStats
@@ -221,7 +225,7 @@ avifResult CreateBenchmarkSource(BenchmarkConfig * config, ImagePtr * image, avi
                                              AVIF_APP_FILE_FORMAT_UNKNOWN,
                                              AVIF_PIXEL_FORMAT_YUV420,
                                              static_cast<int>(config->depth),
-                                             AVIF_CHROMA_DOWNSAMPLING_AUTOMATIC,
+                                             AVIF_CHROMA_DOWNSAMPLING_SHARP_YUV,
                                              AVIF_FALSE,
                                              AVIF_FALSE,
                                              AVIF_FALSE,
@@ -253,22 +257,11 @@ avifResult CreateBenchmarkSource(BenchmarkConfig * config, ImagePtr * image, avi
     return AVIF_RESULT_OK;
 }
 
-avifResult EncodeOnce(const BenchmarkConfig & config,
-                      const std::string & pool_id,
-                      avifImage * image,
-                      size_t * output_size,
-                      avifDiagnostics * diag)
+avifResult ConfigureEncoder(const BenchmarkConfig & config,
+                            const std::string & pool_id,
+                            avifEncoder * encoder,
+                            avifDiagnostics * diag)
 {
-    if (output_size) {
-        *output_size = 0;
-    }
-
-    avifEncoder * encoder = avifEncoderCreate();
-    if (!encoder) {
-        testutil::SetDiagMessage(diag, "Failed to allocate avifEncoder");
-        return AVIF_RESULT_OUT_OF_MEMORY;
-    }
-
     encoder->codecChoice = avifNvencCodecChoice();
     encoder->quality = config.quality;
     encoder->qualityAlpha = config.quality;
@@ -283,6 +276,31 @@ avifResult EncodeOnce(const BenchmarkConfig & config,
     if (result == AVIF_RESULT_OK) {
         result = SetCodecOption(encoder, AVIF_NVENC_OPTION_TUNING, config.tuning, diag);
     }
+    for (const auto & [key, value] : config.codec_options) {
+        if (result != AVIF_RESULT_OK) {
+            break;
+        }
+        result = avifEncoderSetCodecSpecificOption(encoder, key.c_str(), value.c_str());
+        *diag = encoder->diag;
+    }
+    return result;
+}
+
+avifResult EncodeOnce(const BenchmarkConfig & config,
+                      const std::string & pool_id,
+                      avifImage * image,
+                      size_t * output_size,
+                      avifDiagnostics * diag)
+{
+    if (output_size) {
+        *output_size = 0;
+    }
+    avifEncoder * encoder = avifEncoderCreate();
+    if (!encoder) {
+        testutil::SetDiagMessage(diag, "Failed to allocate avifEncoder");
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    avifResult result = ConfigureEncoder(config, pool_id, encoder, diag);
 
     avifRWData output = AVIF_DATA_EMPTY;
     if (result == AVIF_RESULT_OK) {
@@ -392,10 +410,10 @@ void PrintPhaseSummary(std::string_view phase_name, const BenchmarkConfig & conf
 
     std::cout << phase_name << ":\n";
     std::cout << "  encodes: " << result.stats.completed << "\n";
-    std::cout << "  wall time: " << std::fixed << std::setprecision(3) << result.wall_seconds << " s\n";
+    std::cout << "  wall time: " << std::fixed << std::setprecision(6) << result.wall_seconds << " s\n";
     std::cout << "  throughput: " << std::setprecision(2) << encodes_per_second << " fps, " << megapixels_per_second
               << " MPix/s\n";
-    std::cout << "  latency: avg " << average_latency_ms << " ms, min " << result.stats.min_latency_ms << " ms, max "
+    std::cout << "  latency: avg " << std::setprecision(4) << average_latency_ms << " ms, min " << result.stats.min_latency_ms << " ms, max "
               << result.stats.max_latency_ms << " ms\n";
     std::cout << "  average output size: " << average_output_bytes << " bytes\n";
 }
@@ -417,6 +435,8 @@ BenchmarkConfig ParseCommandLine(int argc, const char * const argv[])
     argparse::ArgValue<std::string> arg_input;
     argparse::ArgValue<std::string> arg_preset;
     argparse::ArgValue<std::string> arg_tuning;
+    argparse::ArgValue<std::vector<std::string>> arg_codec_options;
+    argparse::ArgValue<bool> arg_dry_run;
 
     parser.add_argument(arg_width, "--width")
         .help("Synthetic benchmark image width when --input is omitted")
@@ -452,6 +472,13 @@ BenchmarkConfig ParseCommandLine(int argc, const char * const argv[])
         .help("Optional NVENC preset override such as P4 or P7");
     parser.add_argument(arg_tuning, "--tuning")
         .help("Optional NVENC tuning override such as HIGH_QUALITY");
+    parser.add_argument(arg_codec_options, "--codec-option", "-a")
+        .nargs('+')
+        .help("Codec-specific key=value options; may be repeated (pool is reserved)");
+    parser.add_argument(arg_dry_run, "--dry-run")
+        .action(argparse::Action::STORE_TRUE)
+        .default_value("false")
+        .help("Decode input and validate/print resolved options without initializing NVENC or timing encodes");
 
     parser.parse_args(argc, argv);
 
@@ -486,7 +513,47 @@ BenchmarkConfig ParseCommandLine(int argc, const char * const argv[])
     if (arg_tuning.provenance() == argparse::Provenance::SPECIFIED) {
         config.tuning = arg_tuning.value();
     }
+    if (arg_codec_options.provenance() == argparse::Provenance::SPECIFIED) {
+        for (const auto & option : arg_codec_options.value()) {
+            const size_t equals = option.find('=');
+            if (equals == std::string::npos || equals == 0 || equals + 1 == option.size() ||
+                option.substr(0, equals) == AVIF_NVENC_OPTION_POOL) {
+                std::cerr << "Invalid codec option: expected key=value, with pool reserved for the benchmark\n";
+                std::exit(1);
+            }
+            config.codec_options.emplace_back(option.substr(0, equals), option.substr(equals + 1));
+        }
+    }
+    config.dry_run = arg_dry_run.value();
     return config;
+}
+
+avifResult PrintResolvedOptions(const BenchmarkConfig & config, const avifImage * image, avifDiagnostics * diag)
+{
+    avifEncoder * encoder = avifEncoderCreate();
+    if (!encoder) {
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    }
+    avifResult result = ConfigureEncoder(config, "preflight", encoder, diag);
+    session_request request;
+    if (result == AVIF_RESULT_OK) {
+        result = build_session_request(encoder, image, AVIF_FALSE, 0, 0, config.quality,
+                                       AVIF_ADD_IMAGE_FLAG_SINGLE, &request, diag);
+    }
+    if (result == AVIF_RESULT_OK) {
+        const auto & c = request.config;
+        const auto offset = [](const std::optional<int8_t> & value) {
+            return value ? std::to_string(static_cast<int>(*value)) : std::string("preset");
+        };
+        std::cout << "  resolved QP: " << static_cast<int>(c.qp) << "\n";
+        std::cout << "  spatial AQ: " << (c.spatial_aq ? "on" : "off")
+                  << ", strength " << static_cast<int>(c.aq_strength.value_or(0)) << " (0 = driver)\n";
+        std::cout << "  offsets (Y DC, U DC, V DC, U AC, V AC): "
+                  << offset(c.y_dc_qp_offset) << ", " << offset(c.u_dc_qp_offset) << ", "
+                  << offset(c.v_dc_qp_offset) << ", " << offset(c.cb_qp_offset) << ", " << offset(c.cr_qp_offset) << "\n";
+    }
+    avifEncoderDestroy(encoder);
+    return result;
 }
 
 void PrintConfiguration(const BenchmarkConfig & config)
@@ -539,6 +606,15 @@ int main(int argc, const char * const argv[])
     }
 
     avif_nvenc::PrintConfiguration(config);
+    result = avif_nvenc::PrintResolvedOptions(config, source_image.get(), &diag);
+    if (result != AVIF_RESULT_OK) {
+        avif_nvenc::PrintFailure("benchmark option preflight", result, &diag);
+        return 1;
+    }
+    if (config.dry_run) {
+        std::cout << "dry-run: no GPU initialization or timing performed\n";
+        return 0;
+    }
 
     const avifResult register_result = avifNvencRegister();
     if (register_result != AVIF_RESULT_OK) {

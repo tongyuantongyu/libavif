@@ -480,11 +480,16 @@ struct nvenc_session::impl
         config_out->rcParams.zeroReorderDelay = 1;
         config_out->rcParams.enableAQ = config.spatial_aq ? 1u : 0u;
         config_out->rcParams.enableLookahead = 0;
+        config_out->rcParams.enableExtLookahead = 0;
+        config_out->rcParams.lookaheadDepth = 0;
+        config_out->rcParams.lookaheadLevel = NV_ENC_LOOKAHEAD_LEVEL_0;
         config_out->rcParams.enableTemporalAQ = 0;
         config_out->rcParams.enableNonRefP = 0;
         config_out->rcParams.enableMinQP = 1;
         config_out->rcParams.enableMaxQP = 1;
-        config_out->rcParams.aqStrength = config.spatial_aq ? config.aq_strength.value_or(8) : 0u;
+        // Automatic policy has already been resolved when building the request.
+        // Numeric zero retains the SDK's driver-selected strength behavior.
+        config_out->rcParams.aqStrength = config.spatial_aq ? config.aq_strength.value_or(0) : 0u;
         config_out->rcParams.minQP = { config.min_qp, config.min_qp, config.min_qp };
         config_out->rcParams.maxQP = { config.max_qp, config.max_qp, config.max_qp };
         const uint32_t qp = config.qp;
@@ -510,6 +515,10 @@ struct nvenc_session::impl
         }
 
         NV_ENC_CONFIG_AV1 & av1_config = config_out->encodeCodecConfig.av1Config;
+        // UHQ presets can retain temporal filtering and B-reference settings.
+        // They are incompatible with this all-intra, zero-reorder configuration.
+        av1_config.tfLevel = NV_ENC_TEMPORAL_FILTER_LEVEL_0;
+        av1_config.useBFramesAsRef = NV_ENC_BFRAME_REF_MODE_DISABLED;
         if (config.min_part_size.has_value()) {
             av1_config.minPartSize = config.min_part_size.value();
         }

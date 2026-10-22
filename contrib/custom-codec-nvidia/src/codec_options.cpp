@@ -4,11 +4,13 @@
 #include "codec_options.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "avif_nvenc_codec.h"
 #include "exception.h"
@@ -199,6 +201,53 @@ int quality_to_qp(int quality)
     return std::clamp(((100 - quality) * 255 + 50) / 100, 0, 255);
 }
 
+template <size_t N>
+int interpolate_qp_curve(int qp, const std::array<std::pair<int, int>, N> & knots)
+{
+    for (size_t i = 1; i < N; ++i) {
+        const auto [x0, y0] = knots[i - 1];
+        const auto [x1, y1] = knots[i];
+        if (qp <= x1) {
+            const int denominator = x1 - x0;
+            const int numerator = y0 * (x1 - qp) + y1 * (qp - x0);
+            // Round to nearest integer, including negative offsets.
+            return numerator >= 0 ? (numerator + denominator / 2) / denominator
+                                  : -((-numerator + denominator / 2) / denominator);
+        }
+    }
+    return knots.back().second;
+}
+
+struct quantization_defaults
+{
+    uint8_t aq_strength;
+    int8_t y_dc;
+    int8_t uv_dc;
+    int8_t uv_ac;
+};
+
+quantization_defaults tuned_quantization(int qp)
+{
+    // QP uses NVENC's full 0-255 index scale. Strong AQ at low QP hurts
+    // very-high-quality rate/distortion, so strength increases with QP.
+    static constexpr std::array<std::pair<int, int>, 6> aq = {
+        { { 0, 2 }, { 16, 2 }, { 64, 8 }, { 96, 13 }, { 128, 15 }, { 255, 15 } }
+    };
+    static constexpr std::array<std::pair<int, int>, 7> y_dc = {
+        { { 0, 0 }, { 16, -8 }, { 32, -16 }, { 64, -24 }, { 96, -24 }, { 128, -16 }, { 255, -16 } }
+    };
+    static constexpr std::array<std::pair<int, int>, 6> uv_dc = {
+        { { 0, 0 }, { 16, -16 }, { 32, -16 }, { 64, -24 }, { 96, -16 }, { 255, -16 } }
+    };
+    static constexpr std::array<std::pair<int, int>, 5> uv_ac = {
+        { { 0, 0 }, { 96, 0 }, { 128, -8 }, { 160, -16 }, { 255, -16 } }
+    };
+    return { static_cast<uint8_t>(interpolate_qp_curve(qp, aq)),
+             static_cast<int8_t>(interpolate_qp_curve(qp, y_dc)),
+             static_cast<int8_t>(interpolate_qp_curve(qp, uv_dc)),
+             static_cast<int8_t>(interpolate_qp_curve(qp, uv_ac)) };
+}
+
 NV_ENC_BUFFER_FORMAT color_buffer_format_for(const avifImage * image)
 {
     switch (image->yuvFormat) {
@@ -275,11 +324,18 @@ avifResult parse_codec_options_internal(const avifCodecSpecificOptions * cs_opti
             options->spatial_aq_was_explicit = true;
         } else if (key == AVIF_NVENC_OPTION_AQ_STRENGTH) {
             uint32_t aq_strength = 0;
-            if (!parse_integer<uint32_t>(value, &aq_strength) || aq_strength < 1 || aq_strength > 15) {
-                set_diagnostic(diag, "Invalid NVENC aq-strength option: {}", value);
-                return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+            if (ascii_lower(value) == "auto") {
+                // An unset strength selects our QP-dependent policy. Numeric zero
+                // is deliberately distinct: it requests the driver's selection.
+                options->aq_strength.reset();
+            } else {
+                if (!parse_integer<uint32_t>(value, &aq_strength) || aq_strength > 15) {
+                    set_diagnostic(diag, "Invalid NVENC aq-strength option: {} (expected auto or 0 to 15)", value);
+                    return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+                }
+                options->aq_strength = static_cast<uint8_t>(aq_strength);
             }
-            options->aq_strength = static_cast<uint8_t>(aq_strength);
+            options->aq_strength_was_explicit = true;
         } else if (key == AVIF_NVENC_OPTION_MIN_PART_SIZE) {
             NV_ENC_AV1_PART_SIZE part_size = NV_ENC_AV1_PART_SIZE_AUTOSELECT;
             if (!parse_av1_part_size(value, &part_size)) {
@@ -356,7 +412,7 @@ avifResult parse_codec_options_internal(const avifCodecSpecificOptions * cs_opti
         set_diagnostic(diag, "NVENC film-grain-dither-strength cannot be combined with film-grain-table");
         return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
     }
-    if (options->aq_strength.has_value()) {
+    if (options->aq_strength_was_explicit) {
         if (options->spatial_aq_was_explicit && !options->spatial_aq) {
             set_diagnostic(diag, "NVENC aq-strength requires aq to be enabled");
             return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
@@ -489,7 +545,8 @@ avifResult build_session_request(avifEncoder * encoder,
     request->config.tuning = options.tuning;
     request->config.qp = options.qp.value_or(quality_to_qp(quality));
     request->config.spatial_aq = options.spatial_aq;
-    request->config.aq_strength = options.aq_strength;
+    const quantization_defaults defaults = tuned_quantization(request->config.qp);
+    request->config.aq_strength = options.spatial_aq ? options.aq_strength.value_or(defaults.aq_strength) : 0;
     request->config.min_part_size = options.min_part_size;
     request->config.max_part_size = options.max_part_size;
     request->config.y_dc_qp_offset = options.y_dc_qp_offset;
@@ -497,6 +554,18 @@ avifResult build_session_request(avifEncoder * encoder,
     request->config.v_dc_qp_offset = options.v_dc_qp_offset;
     request->config.cb_qp_offset = options.cb_qp_offset;
     request->config.cr_qp_offset = options.cr_qp_offset;
+    // Offset selection is one mode for all five fields. A user override of
+    // even one field leaves every other field at the NVENC preset default.
+    const bool manual_offsets = options.y_dc_qp_offset.has_value() || options.u_dc_qp_offset.has_value() ||
+                                options.v_dc_qp_offset.has_value() || options.cb_qp_offset.has_value() ||
+                                options.cr_qp_offset.has_value();
+    if (!manual_offsets) {
+        request->config.y_dc_qp_offset = defaults.y_dc;
+        request->config.u_dc_qp_offset = defaults.uv_dc;
+        request->config.v_dc_qp_offset = defaults.uv_dc;
+        request->config.cb_qp_offset = defaults.uv_ac;
+        request->config.cr_qp_offset = defaults.uv_ac;
+    }
     request->config.split_encode_mode = options.split_encode_mode;
     request->config.film_grain.reset();
     if (!request->config.is_alpha && !options.film_grain_table.empty()) {

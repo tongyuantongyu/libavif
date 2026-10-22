@@ -47,9 +47,10 @@ struct codec_options
     NV_ENC_TUNING_INFO tuning = NV_ENC_TUNING_INFO_HIGH_QUALITY;
     bool tuning_was_explicit = false;
     std::optional<uint8_t> qp;
-    bool spatial_aq = false;
+    bool spatial_aq = true;
     bool spatial_aq_was_explicit = false;
     std::optional<uint8_t> aq_strength;
+    bool aq_strength_was_explicit = false;
     std::optional<NV_ENC_AV1_PART_SIZE> min_part_size;
     std::optional<NV_ENC_AV1_PART_SIZE> max_part_size;
     std::optional<int8_t> y_dc_qp_offset;
