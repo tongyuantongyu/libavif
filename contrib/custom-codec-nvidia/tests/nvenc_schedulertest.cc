@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include "../include/scheduler.h"
 #include "gtest/gtest.h"
@@ -8,6 +9,74 @@ namespace avif_nvenc
 {
 namespace
 {
+
+TEST(NvencWatermarkTest, ProtectsLargerSuccessorAndPrioritizesOnlyAtHighWatermark)
+{
+    upload_watermark watermark(8);
+    watermark.admit(1, 2);
+    watermark.admit(2, 4);
+    watermark.upload(1);
+    watermark.upload(1); // The two-layer head is ready to encode.
+    watermark.upload(2);
+    watermark.admit(3, 4);
+    watermark.upload(3);
+    watermark.admit(4, 4);
+    watermark.upload(4); // Three slots remain, protected for a four-layer successor.
+    EXPECT_FALSE(watermark.can_upload(3));
+    EXPECT_FALSE(watermark.can_upload(4));
+    EXPECT_TRUE(watermark.can_upload(2));
+    watermark.release(2);
+    watermark.remove(1);
+    EXPECT_TRUE(watermark.can_upload(3)); // Low watermark: later groups may advance.
+    watermark.upload(3);
+    watermark.upload(2);
+    EXPECT_FALSE(watermark.can_upload(3));
+    watermark.upload(2);
+    watermark.upload(2);
+    EXPECT_EQ(watermark.remaining(2), 0u);
+    watermark.release(4);
+    watermark.remove(2);
+    EXPECT_TRUE(watermark.can_upload(3));
+}
+
+TEST(NvencWatermarkTest, SharedAlphaAndCancellation)
+{
+    upload_watermark watermark(12);
+    watermark.admit(1, 8); // Color and alpha share this session.
+    watermark.admit(2, 4);
+    watermark.upload(2); // A later image may upload first while capacity is available.
+    watermark.upload(2);
+    watermark.upload(2);
+    watermark.upload(2);
+    EXPECT_TRUE(watermark.can_admit(9)); // Registration does not reserve buffers.
+    EXPECT_FALSE(watermark.can_admit(13));
+    EXPECT_TRUE(watermark.can_upload(1));
+    watermark.release(4);
+    watermark.remove(2);
+    for (int i = 0; i < 8; ++i) {
+        watermark.upload(1);
+    }
+    watermark.release(8);
+    watermark.remove(1);
+    EXPECT_EQ(watermark.used(), 0u);
+    EXPECT_TRUE(watermark.can_admit(12));
+}
+
+TEST(NvencWatermarkTest, ReadyJobsCanFillTheSessionAndReleaseCapacity)
+{
+    upload_watermark watermark(4);
+    watermark.admit(1, 2);
+    watermark.admit(2, 2);
+    watermark.upload(2);
+    watermark.upload(2); // Ready order differs from arrival order.
+    watermark.upload(1);
+    watermark.upload(1);
+    EXPECT_EQ(watermark.used(), 4u);
+    EXPECT_TRUE(watermark.can_admit(2)); // Upload, rather than registration, waits.
+    watermark.release(2);
+    watermark.remove(2);
+    EXPECT_TRUE(watermark.can_admit(2));
+}
 
 session_key MakeKey(uint32_t width, uint32_t height, uint32_t depth = 8, NV_ENC_BUFFER_FORMAT format = NV_ENC_BUFFER_FORMAT_NV12)
 {
@@ -67,20 +136,126 @@ public:
     scheduler_decision Plan(const session_key & key) { return scheduler_.plan_acquire(key); }
 
     void RemoveSession(uint64_t session_id) { scheduler_.remove_session(session_id); }
+
     void SetActiveReservations(uint64_t session_id, size_t active_reservations)
     {
         scheduler_.set_active_reservations(session_id, active_reservations);
     }
 
     bool HasKind(const session_key & key) const { return scheduler_.has_kind(key); }
+
     size_t LiveSessions(const session_key & key) const { return scheduler_.live_sessions_for(key); }
+
     size_t Targets(const session_key & key) const { return scheduler_.target_sessions_for(key); }
+
     size_t ActiveReservations(uint64_t session_id) const { return scheduler_.active_reservations_for(session_id); }
 
 private:
     pool_scheduler scheduler_;
     uint64_t next_session_id_ = 1;
 };
+
+TEST(NvencSchedulerGroupTest, IdenticalKeysAcquireTheSameSessionTwice)
+{
+    pool_scheduler scheduler(1, 32);
+    const auto key = MakeKey(1024, 1024);
+    scheduler.add_session(1, key);
+    const auto plan = scheduler.plan_acquire_group({ key, key });
+    ASSERT_TRUE(plan.ready);
+    ASSERT_EQ(plan.sessions.size(), 1u);
+    EXPECT_EQ(plan.request_sessions, (std::vector<size_t> { 0, 0 }));
+    EXPECT_EQ(plan.sessions[0].session_id, 1u);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 0u);
+    scheduler.commit_reservations({ key, key }, { 1, 1 });
+    EXPECT_EQ(scheduler.active_reservations_for(1), 2u);
+    scheduler.release_reservation(1);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 1u);
+}
+
+TEST(NvencSchedulerGroupTest, ProtectsBothSelectedSessionsFromEviction)
+{
+    pool_scheduler scheduler(2, 32);
+    const auto a = MakeKey(512, 512), b = MakeKey(1024, 1024), c = MakeKey(2048, 2048);
+    scheduler.add_session(1, a);
+    scheduler.add_session(2, b);
+    const auto plan = scheduler.plan_acquire_group({ a, c });
+    ASSERT_TRUE(plan.ready);
+    ASSERT_EQ(plan.sessions.size(), 2u);
+    EXPECT_EQ(plan.sessions[0].session_id, 1u);
+    EXPECT_EQ(plan.sessions[1].next_action, scheduler_decision::action::create);
+    EXPECT_EQ(plan.sessions[1].evict_session_id, 2u);
+    // A later failed acquisition cannot change existing pins.
+    scheduler.set_active_reservations(2, 1);
+    EXPECT_FALSE(scheduler.plan_acquire_group({ a, c }).ready);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 0u);
+    EXPECT_EQ(scheduler.active_reservations_for(2), 1u);
+}
+
+TEST(NvencSchedulerGroupTest, CommitsDistinctKeysTogetherAndValidatesBeforePinning)
+{
+    pool_scheduler scheduler(2, 32);
+    const auto a = MakeKey(512, 512), b = MakeKey(1024, 1024);
+    scheduler.add_session(1, a);
+    scheduler.add_session(2, b);
+    EXPECT_THROW(scheduler.commit_reservations({ a, b }, { 1, 1 }), std::logic_error);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 0u);
+    EXPECT_EQ(scheduler.active_reservations_for(2), 0u);
+    scheduler.commit_reservations({ a, b }, { 1, 2 });
+    EXPECT_EQ(scheduler.active_reservations_for(1), 1u);
+    EXPECT_EQ(scheduler.active_reservations_for(2), 1u);
+}
+
+TEST(NvencSchedulerGroupTest, InsufficientPoolLimitFailsWithoutPartialAcquisition)
+{
+    pool_scheduler scheduler(1, 32);
+    const auto a = MakeKey(512, 512), b = MakeKey(1024, 1024);
+    scheduler.add_session(1, a);
+    EXPECT_THROW(scheduler.plan_acquire_group({ a, b }), std::invalid_argument);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 0u);
+}
+
+TEST(NvencSchedulerGroupTest, DuplicateKeyRequiresCapacityForBothPins)
+{
+    pool_scheduler scheduler(1, 32);
+    const auto key = MakeKey(1024, 1024);
+    scheduler.add_session(1, key);
+    scheduler.set_active_reservations(1, 31);
+    EXPECT_FALSE(scheduler.plan_acquire_group({ key, key }).ready);
+    EXPECT_EQ(scheduler.active_reservations_for(1), 31u);
+    scheduler.release_reservation(1);
+    EXPECT_TRUE(scheduler.plan_acquire_group({ key, key }).ready);
+    scheduler.commit_reservations({ key, key }, { 1, 1 });
+    EXPECT_EQ(scheduler.active_reservations_for(1), 32u);
+}
+
+TEST(NvencSchedulerGroupTest, FailedSessionWaitsForPinsThenCanBeReplaced)
+{
+    pool_scheduler scheduler(1, 32);
+    const auto key = MakeKey(1024, 1024);
+    scheduler.add_session(1, key);
+    scheduler.commit_reservations({ key }, { 1 });
+    scheduler.mark_unusable(1);
+    EXPECT_FALSE(scheduler.plan_acquire_group({ key }).ready);
+    scheduler.release_reservation(1);
+    const auto plan = scheduler.plan_acquire_group({ key });
+    ASSERT_TRUE(plan.ready);
+    EXPECT_EQ(plan.sessions[0].next_action, scheduler_decision::action::create);
+    EXPECT_EQ(plan.sessions[0].evict_session_id, 1u);
+}
+
+TEST(NvencWatermarkTest, RegistersWithoutWaitingForFreeBuffers)
+{
+    upload_watermark watermark(4);
+    watermark.admit(1, 4);
+    for (int i = 0; i < 4; ++i) {
+        watermark.upload(1);
+    }
+    watermark.admit(2, 4); // No buffer reservation or wait during registration.
+    EXPECT_FALSE(watermark.can_upload(2));
+    watermark.release(4);
+    watermark.remove(1);
+    EXPECT_TRUE(watermark.can_upload(2));
+}
 
 TEST(NvencSchedulerTest, OneHotKindWarmsUpOneSessionPerAcquire)
 {

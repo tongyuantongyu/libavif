@@ -164,6 +164,11 @@ uint32_t read_uvlc(bit_reader & r)
 
 struct sequence_info
 {
+    bool still_picture = false;
+    size_t operating_point_pos = 0;
+    uint32_t operating_point_count = 0;
+    size_t max_width_pos = 0;
+    size_t max_height_pos = 0;
     bool reduced_still_picture_header = false;
     int width_bits = 0;
     int height_bits = 0;
@@ -171,6 +176,9 @@ struct sequence_info
     uint32_t max_height = 0;
     bool frame_id_numbers_present = false;
     int id_len = 0;
+    int delta_id_len = 0;
+    bool enable_warped_motion = false;
+    bool enable_ref_frame_mvs = false;
     bool use_128x128 = false;
     bool enable_superres = false;
     bool enable_cdef = false;
@@ -193,7 +201,7 @@ struct sequence_info
 void rewrite_sequence_header(bit_reader & r, bit_writer & w, uint32_t width, uint32_t height, sequence_info * seq)
 {
     const uint32_t seq_profile = r.read(3);
-    r.read(1); // still_picture
+    seq->still_picture = r.read(1);
     seq->reduced_still_picture_header = r.read(1);
     if (seq->reduced_still_picture_header) {
         return;
@@ -213,7 +221,11 @@ void rewrite_sequence_header(bit_reader & r, bit_writer & w, uint32_t width, uin
     }
     const bool initial_display_delay_present = r.read(1);
     const uint32_t operating_points_cnt = r.read(5) + 1;
+    seq->operating_point_count = operating_points_cnt;
     for (uint32_t i = 0; i < operating_points_cnt; ++i) {
+        if (i == 0) {
+            seq->operating_point_pos = r.pos();
+        }
         r.read(12); // operating_point_idc
         const uint32_t level = r.read(5);
         const uint32_t tier = (level > 7) ? r.read(1) : 0;
@@ -231,21 +243,27 @@ void rewrite_sequence_header(bit_reader & r, bit_writer & w, uint32_t width, uin
     seq->width_bits = static_cast<int>(r.read(4)) + 1;
     seq->height_bits = static_cast<int>(r.read(4)) + 1;
     // max_frame_width/height may be the bucket size rather than the actual frame size.
+    seq->max_width_pos = r.pos();
     seq->max_width = r.read(seq->width_bits) + 1;
+    seq->max_height_pos = r.pos();
     seq->max_height = r.read(seq->height_bits) + 1;
     seq->frame_id_numbers_present = r.read(1);
     if (seq->frame_id_numbers_present) {
         const int delta_frame_id_length = static_cast<int>(r.read(4)) + 2;
+        seq->delta_id_len = delta_frame_id_length;
         const int additional_frame_id_length = static_cast<int>(r.read(3)) + 1;
         seq->id_len = delta_frame_id_length + additional_frame_id_length;
     }
     seq->use_128x128 = r.read(1);
     const uint32_t enable_filter_intra = r.read(1);
     const uint32_t enable_intra_edge_filter = r.read(1);
-    r.read(4); // enable_interintra_compound, enable_masked_compound, enable_warped_motion, enable_dual_filter
+    r.read(2); // enable_interintra_compound, enable_masked_compound
+    seq->enable_warped_motion = r.read(1);
+    r.read(1); // enable_dual_filter
     const bool enable_order_hint = r.read(1);
     if (enable_order_hint) {
-        r.read(2); // enable_jnt_comp, enable_ref_frame_mvs
+        r.read(1); // enable_jnt_comp
+        seq->enable_ref_frame_mvs = r.read(1);
     }
     if (r.read(1)) { // seq_choose_screen_content_tools
         seq->force_screen_content_tools = kSelectScreenContentTools;
@@ -285,7 +303,7 @@ void rewrite_sequence_header(bit_reader & r, bit_writer & w, uint32_t width, uin
     w.put(seq->enable_restoration, 1);
 
     // color_config(), section 5.5.2. Identical in both forms.
-    tee t{r, w};
+    tee t { r, w };
     const bool high_bitdepth = t.copy(1);
     const bool twelve_bit = seq_profile == 2 && high_bitdepth && t.copy(1);
     seq->mono_chrome = (seq_profile == 1) ? false : t.copy(1);
@@ -422,111 +440,70 @@ void copy_film_grain_params(tee & t, const sequence_info & seq, std::optional<ui
     t.copy(1); // clip_to_restricted_range
 }
 
-// Section 5.9.2, for a shown key frame. Reads the frame header from `r`, validates that it
-// describes width x height, and writes it with reduced_still_picture_header semantics to `w`.
-// Stops after the last header bit (before byte_alignment).
-void rewrite_frame_header(bit_reader & r,
-                          bit_writer & w,
-                          const sequence_info & seq,
-                          uint32_t width,
-                          uint32_t height,
-                          std::optional<uint16_t> grain_seed)
+struct reference_header
 {
-    if (r.read(1)) { // show_existing_frame
-        throw msg_exception("AV1 show_existing_frame is not supported");
-    }
-    if (r.read(2) != 0) { // frame_type
-        throw msg_exception("AV1 frame is not a key frame");
-    }
-    if (!r.read(1)) { // show_frame
-        throw msg_exception("AV1 key frame is not shown");
-    }
-    // showable_frame and error_resilient_mode are implied for a shown key frame.
+    bool valid = false;
+    uint32_t width = 0, height = 0;
+    int order_hint = 0;
+    std::array<bool, kMaxSegments> alt_q_enabled {};
+    std::array<int32_t, kMaxSegments> alt_q {};
+};
 
-    const uint32_t disable_cdf_update = r.read(1);
-    uint32_t allow_screen_content_tools = seq.force_screen_content_tools;
-    if (seq.force_screen_content_tools == kSelectScreenContentTools) {
-        allow_screen_content_tools = r.read(1);
-    }
-    uint32_t force_integer_mv = 1; // always 1 for intra frames
-    if (allow_screen_content_tools && seq.force_integer_mv == kSelectIntegerMv) {
-        r.read(1);
-    }
-    if (seq.frame_id_numbers_present) {
-        r.read(seq.id_len); // current_frame_id
-    }
-    const bool frame_size_override_flag = r.read(1);
-    r.read(seq.order_hint_bits); // order_hint
-    // primary_ref_frame, refresh_frame_flags and ref_order_hint are not coded for shown intra frames.
+struct layered_frame_context
+{
+    uint32_t type = 0;
+    reference_header current;
+    std::array<int, 7> refs {};
+    const std::array<reference_header, 8> * history = nullptr;
+    bool intra = true;
+    bool error_resilient = true;
+    bool high_precision_mv = false;
+    uint32_t primary = 7;
+    uint32_t refresh = 255;
+    std::optional<size_t> grain_seed_pos;
+};
 
-    // frame_size()
-    uint32_t upscaled_width = 0;
-    uint32_t frame_height = 0;
-    if (frame_size_override_flag) {
-        upscaled_width = r.read(seq.width_bits) + 1;
-        frame_height = r.read(seq.height_bits) + 1;
-    } else {
-        upscaled_width = seq.max_width;
-        frame_height = seq.max_height;
+int relative_hint(int a, int b, int bits)
+{
+    if (!bits) {
+        return 0;
     }
-    if (upscaled_width != width || frame_height != height) {
-        throw msg_exception(std::format("AV1 frame size {}x{} does not match image size {}x{}", upscaled_width, frame_height, width, height));
-    }
-    // superres_params()
-    uint32_t use_superres = 0;
-    uint32_t coded_denom = 0;
-    if (seq.enable_superres) {
-        use_superres = r.read(1);
-        if (use_superres) {
-            coded_denom = r.read(3);
+    const int sign = 1 << (bits - 1);
+    const int diff = (a - b) & ((1 << bits) - 1);
+    return (diff & (sign - 1)) - (diff & sign);
+}
+
+// Subexpression code length is independent of the reference/recentering value.
+void copy_subexp(tee & t, uint32_t symbols)
+{
+    uint32_t consumed = 0;
+    for (int i = 0; i < 32; ++i) {
+        const int bits = i ? 2 + i : 3;
+        const uint32_t block = 1u << bits;
+        if (symbols <= consumed + 3 * block) {
+            t.copy_ns(symbols - consumed);
+            return;
         }
-    }
-    const uint32_t superres_denom = use_superres ? coded_denom + 9 : 8;
-    const uint32_t frame_width = (upscaled_width * 8 + (superres_denom / 2)) / superres_denom;
-    const uint32_t mi_cols = 2 * ((frame_width + 7) >> 3);
-    const uint32_t mi_rows = 2 * ((frame_height + 7) >> 3);
-    // render_size()
-    const uint32_t render_size_different = r.read(1);
-    uint32_t render_size_bits = 0;
-    if (render_size_different) {
-        render_size_bits = r.read(32);
-    }
-    uint32_t allow_intrabc = 0;
-    if (allow_screen_content_tools && upscaled_width == frame_width) {
-        allow_intrabc = r.read(1);
-    }
-    if (!disable_cdf_update) {
-        r.read(1); // disable_frame_end_update_cdf; implied to be 1 by reduced_still_picture_header
-    }
-
-    // Emit the reduced form. With reduced_still_picture_header, show_existing_frame, frame_type,
-    // show_frame, frame_size_override_flag, order_hint and disable_frame_end_update_cdf are not coded,
-    // the frame size is the max frame size from the sequence header, and
-    // seq_force_screen_content_tools/seq_force_integer_mv are always SELECT.
-    w.put(disable_cdf_update, 1);
-    w.put(allow_screen_content_tools, 1);
-    if (allow_screen_content_tools) {
-        w.put(force_integer_mv, 1);
-    }
-    if (seq.enable_superres) {
-        w.put(use_superres, 1);
-        if (use_superres) {
-            w.put(coded_denom, 3);
+        if (!t.copy(1)) {
+            t.copy(bits);
+            return;
         }
+        consumed += block;
     }
-    w.put(render_size_different, 1);
-    if (render_size_different) {
-        w.put(render_size_bits, 32);
-    }
-    if (allow_screen_content_tools && upscaled_width == frame_width) {
-        w.put(allow_intrabc, 1);
-    }
+    throw msg_exception("Invalid AV1 global motion subexpression");
+}
 
-    // The rest is identical. It has to be parsed to find the end of the header.
-    tee t{r, w};
+void copy_frame_tail(tee & t,
+                     const sequence_info & seq,
+                     uint32_t frame_width,
+                     uint32_t upscaled_width,
+                     uint32_t mi_cols,
+                     uint32_t mi_rows,
+                     uint32_t allow_intrabc,
+                     std::optional<uint16_t> grain_seed,
+                     layered_frame_context * frame = nullptr)
+{
     copy_tile_info(t, seq, mi_cols, mi_rows);
-
-    // quantization_params(), section 5.9.12
     const uint32_t base_q_idx = t.copy(8);
     bool any_delta_q = false;
     const auto copy_delta_q = [&t, &any_delta_q]() {
@@ -554,14 +531,29 @@ void rewrite_frame_header(bit_reader & r,
         }
     }
 
-    // segmentation_params(), section 5.9.14. primary_ref_frame is PRIMARY_REF_NONE.
-    std::array<bool, kMaxSegments> seg_alt_q_enabled{};
-    std::array<int32_t, kMaxSegments> seg_alt_q_data{};
+    // segmentation_params(), section 5.9.14.
+    std::array<bool, kMaxSegments> seg_alt_q_enabled {};
+    std::array<int32_t, kMaxSegments> seg_alt_q_data {};
+    if (frame && frame->primary != 7) {
+        const auto & previous = frame->history->at(frame->refs[frame->primary]);
+        seg_alt_q_enabled = previous.alt_q_enabled;
+        seg_alt_q_data = previous.alt_q;
+    }
     const bool segmentation_enabled = t.copy(1);
-    if (segmentation_enabled) {
-        // segmentation_update_data is implied to be 1.
-        static constexpr std::array<int, kSegLvlMax> feature_bits = {8, 6, 6, 6, 6, 3, 0, 0};
-        static constexpr std::array<int, kSegLvlMax> feature_signed = {1, 1, 1, 1, 1, 0, 0, 0};
+    bool update_data = segmentation_enabled;
+    if (segmentation_enabled && frame && frame->primary != 7) {
+        if (t.copy(1)) {
+            t.copy(1); // update_map, temporal_update
+        }
+        update_data = t.copy(1);
+    }
+    if (!segmentation_enabled || update_data) {
+        seg_alt_q_enabled.fill(false);
+        seg_alt_q_data.fill(0);
+    }
+    if (update_data) {
+        static constexpr std::array<int, kSegLvlMax> feature_bits = { 8, 6, 6, 6, 6, 3, 0, 0 };
+        static constexpr std::array<int, kSegLvlMax> feature_signed = { 1, 1, 1, 1, 1, 0, 0, 0 };
         for (int i = 0; i < kMaxSegments; ++i) {
             for (int j = 0; j < kSegLvlMax; ++j) {
                 if (!t.copy(1)) { // feature_enabled
@@ -580,6 +572,10 @@ void rewrite_frame_header(bit_reader & r,
             }
         }
     }
+    if (frame) {
+        frame->current.alt_q_enabled = seg_alt_q_enabled;
+        frame->current.alt_q = seg_alt_q_data;
+    }
 
     // delta_q_params() and delta_lf_params()
     bool delta_q_present = false;
@@ -587,7 +583,7 @@ void rewrite_frame_header(bit_reader & r,
         delta_q_present = t.copy(1);
     }
     if (delta_q_present) {
-        t.copy(2); // delta_q_res
+        t.copy(2);                         // delta_q_res
         if (!allow_intrabc && t.copy(1)) { // delta_lf_present
             t.copy(2);                     // delta_lf_res
             t.copy(1);                     // delta_lf_multi
@@ -598,9 +594,9 @@ void rewrite_frame_header(bit_reader & r,
     if (coded_lossless) {
         for (int i = 0; i < kMaxSegments; ++i) {
             // get_qindex( 1, segmentId )
-            const int32_t qindex =
-                (segmentation_enabled && seg_alt_q_enabled[i]) ? std::clamp(static_cast<int32_t>(base_q_idx) + seg_alt_q_data[i], 0, 255)
-                                                                : static_cast<int32_t>(base_q_idx);
+            const int32_t qindex = (segmentation_enabled && seg_alt_q_enabled[i])
+                                       ? std::clamp(static_cast<int32_t>(base_q_idx) + seg_alt_q_data[i], 0, 255)
+                                       : static_cast<int32_t>(base_q_idx);
             if (qindex != 0) {
                 coded_lossless = false;
                 break;
@@ -616,8 +612,8 @@ void rewrite_frame_header(bit_reader & r,
         if (seq.num_planes() > 1 && (level0 || level1)) {
             t.copy(12); // loop_filter_level[ 2 ], loop_filter_level[ 3 ]
         }
-        t.copy(3); // loop_filter_sharpness
-        if (t.copy(1)) { // loop_filter_delta_enabled
+        t.copy(3);           // loop_filter_sharpness
+        if (t.copy(1)) {     // loop_filter_delta_enabled
             if (t.copy(1)) { // loop_filter_delta_update
                 for (int i = 0; i < kTotalRefsPerFrame; ++i) {
                     if (t.copy(1)) {
@@ -671,18 +667,359 @@ void rewrite_frame_header(bit_reader & r,
     if (!coded_lossless) {
         t.copy(1); // tx_mode_select
     }
-    // frame_reference_mode(), skip_mode_params(), allow_warped_motion and global_motion_params()
-    // code nothing for intra frames.
+    if (frame && !frame->intra) {
+        const bool select = t.copy(1); // reference_select
+        if (select && seq.order_hint_bits) {
+            int closest_forward = -1000000;
+            bool backward = false;
+            for (int index : frame->refs) {
+                const int distance = relative_hint(frame->history->at(index).order_hint, frame->current.order_hint, seq.order_hint_bits);
+                if (distance < 0) {
+                    closest_forward = std::max(closest_forward, distance);
+                }
+                backward |= distance > 0;
+            }
+            bool second_forward = false;
+            for (int index : frame->refs) {
+                const int distance = relative_hint(frame->history->at(index).order_hint, frame->current.order_hint, seq.order_hint_bits);
+                second_forward |= distance < closest_forward;
+            }
+            if (closest_forward != -1000000 && (backward || second_forward)) {
+                t.copy(1); // skip_mode_present
+            }
+        }
+        if (!frame->error_resilient && seq.enable_warped_motion) {
+            t.copy(1);
+        }
+    }
     t.copy(1); // reduced_tx_set
 
+    if (frame && !frame->intra) {
+        for (int ref = 0; ref < 7; ++ref) {
+            if (!t.copy(1)) {
+                continue; // IDENTITY
+            }
+            int type = 2; // ROTZOOM
+            if (!t.copy(1)) {
+                type = t.copy(1) ? 1 : 3; // TRANSLATION or AFFINE
+            }
+            if (type >= 2) {
+                copy_subexp(t, (1u << 13) + 1);
+                copy_subexp(t, (1u << 13) + 1);
+                if (type == 3) {
+                    copy_subexp(t, (1u << 13) + 1);
+                    copy_subexp(t, (1u << 13) + 1);
+                }
+            }
+            const int bits = type == 1 ? 9 - !frame->high_precision_mv : 12;
+            copy_subexp(t, (1u << (bits + 1)) + 1);
+            copy_subexp(t, (1u << (bits + 1)) + 1);
+        }
+    }
+
     if (seq.film_grain_params_present) {
-        copy_film_grain_params(t, seq, grain_seed);
+        if (frame) {
+            // grain_seed precedes update_grain and remains present when the
+            // rest of the parameters are inherited from a reference frame.
+            if (t.copy(1)) {
+                frame->grain_seed_pos = t.r.pos();
+            }
+        } else {
+            copy_film_grain_params(t, seq, grain_seed);
+        }
+    }
+}
+
+// Section 5.9.2, for a shown key frame. Reads the frame header from `r`, validates that it
+// describes width x height, and writes it with reduced_still_picture_header semantics to `w`.
+// Stops after the last header bit (before byte_alignment).
+void rewrite_frame_header(bit_reader & r, bit_writer & w, const sequence_info & seq, uint32_t width, uint32_t height, std::optional<uint16_t> grain_seed)
+{
+    if (r.read(1)) { // show_existing_frame
+        throw msg_exception("AV1 show_existing_frame is not supported");
+    }
+    if (r.read(2) != 0) { // frame_type
+        throw msg_exception("AV1 frame is not a key frame");
+    }
+    if (!r.read(1)) { // show_frame
+        throw msg_exception("AV1 key frame is not shown");
+    }
+    // showable_frame and error_resilient_mode are implied for a shown key frame.
+
+    const uint32_t disable_cdf_update = r.read(1);
+    uint32_t allow_screen_content_tools = seq.force_screen_content_tools;
+    if (seq.force_screen_content_tools == kSelectScreenContentTools) {
+        allow_screen_content_tools = r.read(1);
+    }
+    uint32_t force_integer_mv = 1; // always 1 for intra frames
+    if (allow_screen_content_tools && seq.force_integer_mv == kSelectIntegerMv) {
+        r.read(1);
+    }
+    if (seq.frame_id_numbers_present) {
+        r.read(seq.id_len); // current_frame_id
+    }
+    const bool frame_size_override_flag = r.read(1);
+    r.read(seq.order_hint_bits); // order_hint
+    // primary_ref_frame, refresh_frame_flags and ref_order_hint are not coded for shown intra frames.
+
+    // frame_size()
+    uint32_t upscaled_width = 0;
+    uint32_t frame_height = 0;
+    if (frame_size_override_flag) {
+        upscaled_width = r.read(seq.width_bits) + 1;
+        frame_height = r.read(seq.height_bits) + 1;
+    } else {
+        upscaled_width = seq.max_width;
+        frame_height = seq.max_height;
+    }
+    if (upscaled_width != width || frame_height != height) {
+        throw msg_exception(
+            std::format("AV1 frame size {}x{} does not match image size {}x{}", upscaled_width, frame_height, width, height));
+    }
+    // superres_params()
+    uint32_t use_superres = 0;
+    uint32_t coded_denom = 0;
+    if (seq.enable_superres) {
+        use_superres = r.read(1);
+        if (use_superres) {
+            coded_denom = r.read(3);
+        }
+    }
+    const uint32_t superres_denom = use_superres ? coded_denom + 9 : 8;
+    const uint32_t frame_width = (upscaled_width * 8 + (superres_denom / 2)) / superres_denom;
+    const uint32_t mi_cols = 2 * ((frame_width + 7) >> 3);
+    const uint32_t mi_rows = 2 * ((frame_height + 7) >> 3);
+    // render_size()
+    const uint32_t render_size_different = r.read(1);
+    uint32_t render_size_bits = 0;
+    if (render_size_different) {
+        render_size_bits = r.read(32);
+    }
+    uint32_t allow_intrabc = 0;
+    if (allow_screen_content_tools && upscaled_width == frame_width) {
+        allow_intrabc = r.read(1);
+    }
+    if (!disable_cdf_update) {
+        r.read(1); // disable_frame_end_update_cdf; implied to be 1 by reduced_still_picture_header
+    }
+
+    // Emit the reduced form. With reduced_still_picture_header, show_existing_frame, frame_type,
+    // show_frame, frame_size_override_flag, order_hint and disable_frame_end_update_cdf are not coded,
+    // the frame size is the max frame size from the sequence header, and
+    // seq_force_screen_content_tools/seq_force_integer_mv are always SELECT.
+    w.put(disable_cdf_update, 1);
+    w.put(allow_screen_content_tools, 1);
+    if (allow_screen_content_tools) {
+        w.put(force_integer_mv, 1);
+    }
+    if (seq.enable_superres) {
+        w.put(use_superres, 1);
+        if (use_superres) {
+            w.put(coded_denom, 3);
+        }
+    }
+    w.put(render_size_different, 1);
+    if (render_size_different) {
+        w.put(render_size_bits, 32);
+    }
+    if (allow_screen_content_tools && upscaled_width == frame_width) {
+        w.put(allow_intrabc, 1);
+    }
+
+    tee t { r, w };
+    copy_frame_tail(t, seq, frame_width, upscaled_width, mi_cols, mi_rows, allow_intrabc, grain_seed);
+}
+
+void set_short_refs(layered_frame_context & frame, int last, int golden, const sequence_info & seq)
+{
+    std::array<int, 8> hints {};
+    std::array<bool, 8> used {};
+    const int current = 1 << (seq.order_hint_bits - 1);
+    for (int i = 0; i < 8; ++i) {
+        hints[i] = current + relative_hint(frame.history->at(i).order_hint, frame.current.order_hint, seq.order_hint_bits);
+    }
+    frame.refs.fill(-1);
+    frame.refs[0] = last;
+    frame.refs[3] = golden;
+    used[last] = used[golden] = true;
+    const auto choose = [&](bool backward, bool latest) {
+        int best = -1;
+        for (int i = 0; i < 8; ++i) {
+            if (!used[i] && ((hints[i] >= current) == backward) &&
+                (best < 0 || (latest ? hints[i] >= hints[best] : hints[i] < hints[best]))) {
+                best = i;
+            }
+        }
+        if (best >= 0) {
+            used[best] = true;
+        }
+        return best;
+    };
+    frame.refs[6] = choose(true, true);
+    frame.refs[4] = choose(true, false);
+    frame.refs[5] = choose(true, false);
+    for (int i : { 1, 2, 4, 5, 6 }) {
+        if (frame.refs[i] < 0) {
+            frame.refs[i] = choose(false, true);
+        }
+    }
+    const int earliest = int(std::min_element(hints.begin(), hints.end()) - hints.begin());
+    for (auto & index : frame.refs) {
+        if (index < 0) {
+            index = earliest;
+        }
+    }
+}
+
+// Parse normal, shown KEY/INTER/INTRA_ONLY frame headers. The reference state
+// belongs to this picture, never to the pooled hardware session's previous job.
+layered_frame_context read_layered_frame(bit_reader & r,
+                                         const sequence_info & seq,
+                                         std::array<reference_header, 8> & history,
+                                         uint32_t expected_width,
+                                         uint32_t expected_height)
+{
+    layered_frame_context frame;
+    frame.history = &history;
+    if (r.read(1)) {
+        throw msg_exception("Unexpected show_existing_frame in layered NVENC output");
+    }
+    const auto type = r.read(2);
+    frame.type = type;
+    if (type == 3 || !r.read(1)) {
+        throw msg_exception("Unexpected hidden/switch frame in layered NVENC output");
+    }
+    frame.intra = type != 1;
+    frame.error_resilient = type == 0 ? true : bool(r.read(1));
+    if (type == 0) {
+        history = {};
+    }
+    const bool disable_cdf_update = r.read(1);
+    const bool screen = seq.force_screen_content_tools == 2 ? bool(r.read(1)) : bool(seq.force_screen_content_tools);
+    bool integer_mv = false;
+    if (screen) {
+        integer_mv = seq.force_integer_mv == 2 ? bool(r.read(1)) : bool(seq.force_integer_mv);
+    }
+    if (frame.intra) {
+        integer_mv = true;
+    }
+    if (seq.frame_id_numbers_present) {
+        r.read(seq.id_len);
+    }
+    const bool override_size = r.read(1);
+    frame.current.order_hint = r.read(seq.order_hint_bits);
+    frame.primary = frame.intra || frame.error_resilient ? 7 : r.read(3);
+    frame.refresh = type == 0 ? 255 : r.read(8);
+    if ((!frame.intra || frame.refresh != 255) && frame.error_resilient && seq.order_hint_bits) {
+        for (auto & ref : history) {
+            if (r.read(seq.order_hint_bits) != uint32_t(ref.order_hint)) {
+                ref.valid = false;
+            }
+        }
+    }
+    if (!frame.intra) {
+        const bool short_refs = seq.order_hint_bits ? bool(r.read(1)) : false;
+        if (short_refs) {
+            const int last = r.read(3), golden = r.read(3);
+            set_short_refs(frame, last, golden, seq);
+        }
+        for (auto & index : frame.refs) {
+            if (!short_refs) {
+                index = r.read(3);
+            }
+            if (seq.frame_id_numbers_present) {
+                r.read(seq.delta_id_len);
+            }
+            if (!history[index].valid) {
+                throw msg_exception("Invalid layered AV1 reference frame");
+            }
+        }
+    }
+    bool size_from_ref = false;
+    if (!frame.intra && override_size && !frame.error_resilient) {
+        for (int index : frame.refs) {
+            if (r.read(1)) {
+                frame.current.width = history[index].width;
+                frame.current.height = history[index].height;
+                size_from_ref = true;
+                break;
+            }
+        }
+    }
+    if (!size_from_ref) {
+        frame.current.width = override_size ? r.read(seq.width_bits) + 1 : seq.max_width;
+        frame.current.height = override_size ? r.read(seq.height_bits) + 1 : seq.max_height;
+    }
+    const auto upscaled_width = frame.current.width;
+    uint32_t denominator = 8;
+    if (seq.enable_superres && r.read(1)) {
+        denominator = r.read(3) + 9;
+    }
+    const auto coded_width = (upscaled_width * 8 + denominator / 2) / denominator;
+    if (!size_from_ref && r.read(1)) {
+        r.read(32); // render_size
+    }
+    if (upscaled_width != expected_width || frame.current.height != expected_height) {
+        throw msg_exception("Layered AV1 coded size does not match the uploaded layer");
+    }
+    bool intrabc = false;
+    if (frame.intra) {
+        if (screen && coded_width == upscaled_width) {
+            intrabc = r.read(1);
+        }
+    } else {
+        if (!integer_mv) {
+            frame.high_precision_mv = r.read(1);
+        }
+        if (!r.read(1)) {
+            r.read(2); // interpolation filter
+        }
+        r.read(1); // is_motion_mode_switchable
+        if (!frame.error_resilient && seq.enable_ref_frame_mvs) {
+            r.read(1);
+        }
+    }
+    if (!disable_cdf_update) {
+        r.read(1);
+    }
+    if (seq.film_grain_params_present) {
+        bit_writer ignored;
+        tee t { r, ignored };
+        copy_frame_tail(t,
+                        seq,
+                        coded_width,
+                        upscaled_width,
+                        2 * ((coded_width + 7) >> 3),
+                        2 * ((frame.current.height + 7) >> 3),
+                        intrabc,
+                        std::nullopt,
+                        &frame);
+    }
+    frame.current.valid = true;
+    for (int i = 0; i < 8; ++i) {
+        if (frame.refresh & (1u << i)) {
+            history[i] = frame.current;
+        }
+    }
+    return frame;
+}
+
+void patch_bits(std::vector<uint8_t> & bytes, size_t pos, int count, uint32_t value)
+{
+    if (pos + count > bytes.size() * 8) {
+        throw msg_exception("AV1 bit patch exceeds OBU payload");
+    }
+    for (int i = 0; i < count; ++i) {
+        const auto mask = uint8_t(1u << (7 - ((pos + i) & 7)));
+        auto & byte = bytes[(pos + i) >> 3];
+        byte = (byte & ~mask) | (((value >> (count - i - 1)) & 1) ? mask : 0);
     }
 }
 
 uint32_t read_leb128(const std::vector<uint8_t> & in, size_t * pos)
 {
     uint64_t value = 0;
+    bool terminated = false;
     for (int i = 0; i < 8; ++i) {
         if (*pos >= in.size()) {
             throw msg_exception("AV1 bitstream truncated");
@@ -690,10 +1027,11 @@ uint32_t read_leb128(const std::vector<uint8_t> & in, size_t * pos)
         const uint8_t byte = in[(*pos)++];
         value |= static_cast<uint64_t>(byte & 0x7f) << (i * 7);
         if (!(byte & 0x80)) {
+            terminated = true;
             break;
         }
     }
-    if (value > UINT32_MAX) {
+    if (!terminated || value > UINT32_MAX) {
         throw msg_exception("AV1 OBU too large");
     }
     return static_cast<uint32_t>(value);
@@ -711,7 +1049,12 @@ void append_leb128(std::vector<uint8_t> & out, uint32_t value)
     } while (value);
 }
 
-void append_obu(std::vector<uint8_t> & out, uint32_t type, const uint8_t * extension, const std::vector<uint8_t> & payload_head, const uint8_t * payload_tail, size_t payload_tail_size)
+void append_obu(std::vector<uint8_t> & out,
+                uint32_t type,
+                const uint8_t * extension,
+                const std::vector<uint8_t> & payload_head,
+                const uint8_t * payload_tail,
+                size_t payload_tail_size)
 {
     out.push_back(static_cast<uint8_t>((type << 3) | (extension ? 4 : 0) | 2)); // obu_has_size_field
     if (extension) {
@@ -719,10 +1062,16 @@ void append_obu(std::vector<uint8_t> & out, uint32_t type, const uint8_t * exten
     }
     append_leb128(out, static_cast<uint32_t>(payload_head.size() + payload_tail_size));
     out.insert(out.end(), payload_head.begin(), payload_head.end());
-    out.insert(out.end(), payload_tail, payload_tail + payload_tail_size);
+    if (payload_tail_size) {
+        out.insert(out.end(), payload_tail, payload_tail + payload_tail_size);
+    }
 }
 
-void rewrite(const std::vector<uint8_t> & in, uint32_t width, uint32_t height, std::optional<uint16_t> grain_seed, std::vector<uint8_t> * out)
+void rewrite_still_impl(const std::vector<uint8_t> & in,
+                        uint32_t width,
+                        uint32_t height,
+                        std::optional<uint16_t> grain_seed,
+                        std::vector<uint8_t> * out)
 {
     std::vector<uint8_t> result;
     sequence_info seq;
@@ -785,7 +1134,9 @@ void rewrite(const std::vector<uint8_t> & in, uint32_t width, uint32_t height, s
         } else if (type == kObuRedundantFrameHeader) {
             // frame_header_copy() is meaningless for a reduced still picture.
         } else {
-            result.insert(result.end(), in.begin() + static_cast<std::ptrdiff_t>(obu_start), in.begin() + static_cast<std::ptrdiff_t>(obu_end));
+            result.insert(result.end(),
+                          in.begin() + static_cast<std::ptrdiff_t>(obu_start),
+                          in.begin() + static_cast<std::ptrdiff_t>(obu_end));
         }
     }
     if (!have_sequence_header || !have_frame) {
@@ -794,7 +1145,119 @@ void rewrite(const std::vector<uint8_t> & in, uint32_t width, uint32_t height, s
     *out = std::move(result);
 }
 
+void rewrite_layered_impl(const std::vector<std::vector<uint8_t>> & packets,
+                          const std::vector<std::pair<uint32_t, uint32_t>> & sizes,
+                          uint32_t final_width,
+                          uint32_t final_height,
+                          const std::vector<std::optional<uint16_t>> & grain_seeds,
+                          std::vector<std::vector<uint8_t>> * output)
+{
+    std::vector<std::vector<uint8_t>> result(packets.size());
+    std::array<reference_header, 8> history {};
+    sequence_info seq;
+    std::vector<uint8_t> first_sequence;
+    for (size_t layer = 0; layer < packets.size(); ++layer) {
+        const auto & in = packets[layer];
+        size_t pos = 0;
+        bool have_frame = false;
+        while (pos < in.size()) {
+            const auto header = in[pos++];
+            const uint32_t type = (header >> 3) & 15;
+            if ((header & 0x81) || !(header & 2)) {
+                throw msg_exception("Invalid sized AV1 OBU header");
+            }
+            if (header & 4) {
+                if (pos == in.size()) {
+                    throw msg_exception("Truncated AV1 extension header");
+                }
+                ++pos;
+            }
+            const auto size = read_leb128(in, &pos);
+            if (size > in.size() - pos) {
+                throw msg_exception("Truncated layered AV1 OBU");
+            }
+            std::vector<uint8_t> payload(in.begin() + pos, in.begin() + pos + size);
+            pos += size;
+            if (type == 2 || type == 15 || type == kObuRedundantFrameHeader) {
+                continue;
+            }
+            if (type == kObuSequenceHeader) {
+                bit_reader reader(payload.data(), payload.size());
+                bit_writer ignored;
+                sequence_info next;
+                rewrite_sequence_header(reader, ignored, final_width, final_height, &next);
+                if (next.still_picture || next.reduced_still_picture_header || next.operating_point_count != 1 ||
+                    next.max_width < final_width || next.max_height < final_height) {
+                    throw msg_exception("Unsupported layered AV1 sequence header");
+                }
+                patch_bits(payload, next.operating_point_pos, 12, (((1u << packets.size()) - 1) << 8) | 1);
+                patch_bits(payload, next.max_width_pos, next.width_bits, final_width - 1);
+                patch_bits(payload, next.max_height_pos, next.height_bits, final_height - 1);
+                if (first_sequence.empty()) {
+                    if (layer || have_frame) {
+                        throw msg_exception("Layered AV1 sequence header must precede the first frame");
+                    }
+                    first_sequence = payload;
+                    seq = next;
+                    append_obu(result[layer], type, nullptr, payload, nullptr, 0);
+                } else if (payload != first_sequence) {
+                    throw msg_exception("NVENC changed sequence syntax within a layered image");
+                } else {
+                    seq = next; // Parse frame dimensions using the original, unmodified header.
+                }
+            } else if (type == kObuFrame || type == kObuFrameHeader) {
+                if (first_sequence.empty() || have_frame) {
+                    throw msg_exception("Expected one frame per NVENC layer");
+                }
+                bit_reader reader(payload.data(), payload.size());
+                const auto frame = read_layered_frame(reader, seq, history, sizes[layer].first, sizes[layer].second);
+                if (!layer && frame.type != 0) {
+                    throw msg_exception("First NVENC layer must be a keyframe");
+                }
+                if (grain_seeds[layer] && frame.grain_seed_pos) {
+                    patch_bits(payload, *frame.grain_seed_pos, 16, *grain_seeds[layer]);
+                }
+                const uint8_t extension = static_cast<uint8_t>(layer << 3);
+                append_obu(result[layer], type, &extension, payload, nullptr, 0);
+                have_frame = true;
+            } else {
+                const uint8_t extension = static_cast<uint8_t>(layer << 3);
+                append_obu(result[layer], type, type == 4 ? &extension : nullptr, payload, nullptr, 0);
+            }
+        }
+        if (!have_frame) {
+            throw msg_exception("Missing NVENC layer frame");
+        }
+    }
+    *output = std::move(result);
+}
+
 } // namespace
+
+avifResult rewrite_layered_picture(const std::vector<std::vector<uint8_t>> & packets,
+                                   const std::vector<std::pair<uint32_t, uint32_t>> & sizes,
+                                   uint32_t final_width,
+                                   uint32_t final_height,
+                                   const std::vector<std::optional<uint16_t>> & grain_seeds,
+                                   std::vector<std::vector<uint8_t>> * output,
+                                   avifDiagnostics * diag)
+{
+    if (!output || packets.size() < 2 || packets.size() > 4 || packets.size() != sizes.size() || packets.size() != grain_seeds.size() ||
+        !final_width || !final_height || sizes.back() != std::pair(final_width, final_height)) {
+        set_diagnostic(diag, "Invalid layered AV1 rewrite arguments");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    try {
+        rewrite_layered_impl(packets, sizes, final_width, final_height, grain_seeds, output);
+        return AVIF_RESULT_OK;
+    } catch (const std::bad_alloc &) {
+        set_diagnostic(diag, "Out of memory rewriting layered AV1");
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    } catch (const std::exception & e) {
+        set_diagnostic(diag, "Failed to rewrite layered AV1: {}", e.what());
+        return AVIF_RESULT_UNKNOWN_ERROR;
+    }
+}
 
 avifResult rewrite_to_reduced_still_picture(const std::vector<uint8_t> & in,
                                             uint32_t width,
@@ -808,7 +1271,7 @@ avifResult rewrite_to_reduced_still_picture(const std::vector<uint8_t> & in,
         return AVIF_RESULT_INVALID_ARGUMENT;
     }
     try {
-        rewrite(in, width, height, grain_seed, out);
+        rewrite_still_impl(in, width, height, grain_seed, out);
     } catch (const std::exception & e) {
         set_diagnostic(diag, "failed to rewrite AV1 bitstream to reduced_still_picture_header: {}", e.what());
         return AVIF_RESULT_UNKNOWN_ERROR;

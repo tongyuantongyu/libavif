@@ -73,7 +73,7 @@ struct api_bundle
         }
     }
 
-    NV_ENCODE_API_FUNCTION_LIST functions{};
+    NV_ENCODE_API_FUNCTION_LIST functions {};
 };
 
 avifResult validate_pool_options(const registered_pool_options & options, avifDiagnostics * diag)
@@ -155,14 +155,22 @@ image_size resolve_session_size(const registered_pool_options & options,
 
 } // namespace
 
-class encoder_pool
+struct layered_group::impl
+{
+    std::mutex mutex;
+    std::shared_ptr<nvenc_session::layered_job> jobs[2];
+    uint32_t stream_indices[2] = {};
+    bool cancelled = false;
+};
+
+class encoder_pool : public std::enable_shared_from_this<encoder_pool>
 {
 public:
     encoder_pool(registered_pool_options options, std::shared_ptr<api_bundle> api_bundle)
-        : options_(std::move(options)),
-          context_(std::make_shared<cuda_context_holder>(options_.gpu)),
-          api_bundle_(std::move(api_bundle)),
-          scheduler_(options_.max_sessions, nvenc_session::kFrameCapacity)
+        : options_(std::move(options))
+        , context_(std::make_shared<cuda_context_holder>(options_.gpu))
+        , api_bundle_(std::move(api_bundle))
+        , scheduler_(options_.max_sessions, nvenc_session::kFrameCapacity)
     {
     }
 
@@ -188,9 +196,11 @@ public:
             sessions = std::move(sessions_);
         }
         sessions.clear();
+        context_.reset();
+        api_bundle_.reset();
     }
 
-    AVIF_NODISCARD avifResult acquire(const session_request & request, pool_frame * frame, avifDiagnostics * diag)
+    AVIF_NODISCARD avifResult acquire_single(const session_request & request, pool_frame * frame, avifDiagnostics * diag)
     {
         try {
             if (!frame) {
@@ -215,9 +225,11 @@ public:
 
             std::unique_lock lock(mutex_);
             const uint64_t acquire_ticket = acquire_tickets_.issue_ticket();
+
             struct acquire_ticket_guard
             {
                 explicit acquire_ticket_guard(encoder_pool * pool) : pool(pool) {}
+
                 ~acquire_ticket_guard()
                 {
                     pool->acquire_tickets_.complete_ticket();
@@ -228,9 +240,8 @@ public:
             } ticket_guard(this);
 
             for (;;) {
-                condition_.wait(lock, [this, acquire_ticket] {
-                    return shutting_down_ || acquire_tickets_.is_serving(acquire_ticket);
-                });
+                condition_.wait(lock,
+                                [this, acquire_ticket] { return shutting_down_ || acquire_tickets_.is_serving(acquire_ticket); });
 
                 if (shutting_down_) {
                     set_diagnostic(diag, "NVENC pool '{}' is shutting down", options_.id);
@@ -271,17 +282,188 @@ public:
         }
     }
 
-    void release_reservation(nvenc_session * session) noexcept
+    AVIF_NODISCARD avifResult acquire_layered(const session_request & color,
+                                              const session_request * alpha,
+                                              uint32_t layers,
+                                              image_size final_size,
+                                              std::shared_ptr<layered_group> * output,
+                                              avifDiagnostics * diag)
+    {
+        // Transfer pins to completion callbacks only after registration succeeds.
+        struct reservation_guard
+        {
+            encoder_pool * pool {};
+            nvenc_session * pending[2] = {};
+
+            ~reservation_guard()
+            {
+                for (auto * session : pending) {
+                    if (session) {
+                        pool->release_reservation(session, 1, !session->is_usable());
+                    }
+                }
+            }
+        } reservations { this };
+
+        try {
+            if (!output || layers < 2 || layers > 4) {
+                set_diagnostic(diag, "Invalid layered NVENC acquisition");
+                return AVIF_RESULT_INVALID_ARGUMENT;
+            }
+
+            avifResult result;
+            const auto size = resolve_session_size(options_, final_size.width, final_size.height, diag, &result);
+            if (result != AVIF_RESULT_OK) {
+                return result;
+            }
+
+            std::vector<session_key> keys;
+            const session_request * requests[2] = { &color, alpha };
+            const size_t role_count = alpha ? 2 : 1;
+            for (size_t i = 0; i < role_count; ++i) {
+                session_key key;
+                key.gpu = options_.gpu;
+                key.max_encode_width = size.width;
+                key.max_encode_height = size.height;
+                key.depth = requests[i]->depth;
+                key.buffer_format = requests[i]->buffer_format;
+                key.reference_sequence = true;
+                keys.push_back(key);
+            }
+            if (role_count == 2 && keys[0] != keys[1] && options_.max_sessions < 2) {
+                set_diagnostic(diag,
+                               "NVENC pool '{}' needs 2 distinct sessions for layered color/alpha, but maxSessions is {}",
+                               options_.id,
+                               options_.max_sessions);
+                return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+            }
+
+            auto group = std::make_shared<layered_group>(std::make_unique<layered_group::impl>());
+            scheduler_group_decision plan;
+            std::vector<session_record *> selected;
+            {
+                std::vector<uint64_t> ids(role_count);
+                std::unique_lock lock(mutex_);
+                for (;;) {
+                    if (shutting_down_) {
+                        set_diagnostic(diag, "NVENC pool '{}' is shutting down", options_.id);
+                        return AVIF_RESULT_UNKNOWN_ERROR;
+                    }
+                    plan = scheduler_.plan_acquire_group(keys);
+                    if (plan.ready) {
+                        break;
+                    }
+                    condition_.wait(lock);
+                }
+
+                selected.resize(plan.sessions.size());
+                for (size_t i = 0; i < plan.sessions.size(); ++i) {
+                    const auto & decision = plan.sessions[i];
+                    if (decision.next_action == scheduler_decision::action::reuse) {
+                        selected[i] = session_id_lookup_.at(*decision.session_id);
+                        continue;
+                    }
+                    if (decision.evict_session_id) {
+                        auto evicted = detach_record_locked(session_id_lookup_.at(*decision.evict_session_id));
+                        evicted.reset();
+                    }
+                    size_t role = 0;
+                    while (plan.request_sessions[role] != i) {
+                        ++role;
+                    }
+                    auto record = std::make_unique<session_record>();
+                    record->key = keys[role];
+                    record->scheduler_session_id = next_session_id_++;
+                    record->session =
+                        std::make_unique<nvenc_session>(record->key, requests[role]->config, context_->context, api_bundle_->functions);
+                    auto * raw = record.get();
+                    const auto id = raw->scheduler_session_id;
+                    scheduler_.add_session(id, raw->key);
+                    try {
+                        publish_record_locked(std::move(record));
+                    } catch (...) {
+                        scheduler_.remove_session(id);
+                        throw;
+                    }
+                    selected[i] = raw;
+                }
+                for (size_t role = 0; role < role_count; ++role) {
+                    ids[role] = selected[plan.request_sessions[role]]->scheduler_session_id;
+                }
+
+                scheduler_.commit_reservations(keys, ids);
+                active_reservations_ += role_count;
+                for (size_t role = 0; role < role_count; ++role) {
+                    reservations.pending[role] = selected[plan.request_sessions[role]]->session.get();
+                }
+            }
+
+            for (size_t i = 0; i < selected.size(); ++i) {
+                auto * session = selected[i]->session.get();
+                const auto count = static_cast<size_t>(std::count(plan.request_sessions.begin(), plan.request_sessions.end(), i));
+                std::weak_ptr<layered_group> weak = group;
+                auto completion = [pool = shared_from_this(), session, count, weak](avifResult status) noexcept {
+                    if (status != AVIF_RESULT_OK) {
+                        if (auto owner = weak.lock()) {
+                            owner->cancel();
+                        }
+                    }
+                    const bool unusable = !session->is_usable();
+                    pool->release_reservation(session, count, unusable);
+                };
+                std::shared_ptr<nvenc_session::layered_job> job;
+                result = session->create_layered_job(layers, uint32_t(count), std::move(completion), &job, diag);
+                if (result != AVIF_RESULT_OK) {
+                    group->cancel();
+                    return result;
+                }
+                for (auto & pending : reservations.pending) {
+                    if (pending == session) {
+                        pending = nullptr;
+                    }
+                }
+                bool cancelled;
+                {
+                    std::scoped_lock lock(group->state_->mutex);
+                    uint32_t stream = 0;
+                    for (size_t role = 0; role < role_count; ++role) {
+                        if (plan.request_sessions[role] == i) {
+                            group->state_->jobs[role] = job;
+                            group->state_->stream_indices[role] = stream++;
+                        }
+                    }
+                    cancelled = group->state_->cancelled;
+                }
+                if (cancelled) {
+                    job->cancel();
+                }
+            }
+
+            *output = std::move(group);
+            return AVIF_RESULT_OK;
+        } catch (const std::bad_alloc &) {
+            condition_.notify_all();
+            set_diagnostic(diag, "Out of memory acquiring layered NVENC sessions");
+            return AVIF_RESULT_OUT_OF_MEMORY;
+        } catch (const std::exception & e) {
+            condition_.notify_all();
+            set_diagnostic(diag, "{}", e.what());
+            return AVIF_RESULT_UNKNOWN_ERROR;
+        }
+    }
+
+    void release_reservation(nvenc_session * session, size_t count = 1, bool unusable = false) noexcept
     {
         {
             std::scoped_lock lock(mutex_);
-            if (session) {
-                const auto record_it = session_lookup_.find(session);
-                if (record_it != session_lookup_.end()) {
-                    scheduler_.release_reservation(record_it->second->scheduler_session_id);
-                    if (active_reservations_ > 0) {
-                        --active_reservations_;
-                    }
+            const auto it = session_lookup_.find(session);
+            if (it != session_lookup_.end()) {
+                if (unusable) {
+                    scheduler_.mark_unusable(it->second->scheduler_session_id);
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    scheduler_.release_reservation(it->second->scheduler_session_id);
+                    --active_reservations_;
                 }
             }
         }
@@ -370,11 +552,12 @@ private:
         }
 
         session_record * const raw_record = record.get();
-        scheduler_.add_session(raw_record->scheduler_session_id, key);
+        const auto session_id = raw_record->scheduler_session_id;
+        scheduler_.add_session(session_id, key);
         try {
             publish_record_locked(std::move(record));
         } catch (...) {
-            scheduler_.remove_session(raw_record->scheduler_session_id);
+            scheduler_.remove_session(session_id);
             throw;
         }
         ++active_reservations_;
@@ -403,7 +586,7 @@ namespace
 
 struct registry_pool_entry
 {
-    std::unique_ptr<encoder_pool> pool;
+    std::shared_ptr<encoder_pool> pool;
     size_t active_calls = 0;
     bool shutting_down = false;
 };
@@ -436,6 +619,91 @@ registry_state & shared_registry_state()
 }
 
 } // namespace
+
+// -----------------------------------------------------------------------------
+// Pool management
+
+avifResult create_pool(const registered_pool_options & options, avifDiagnostics * diag)
+{
+    try {
+        const avifResult validate_result = validate_pool_options(options, diag);
+        if (validate_result != AVIF_RESULT_OK) {
+            return validate_result;
+        }
+
+        registry_state & state = shared_registry_state();
+        std::scoped_lock lock(state.mutex);
+        if (state.pools.find(options.id) != state.pools.end()) {
+            set_diagnostic(diag, "NVENC pool '{}' already exists", options.id);
+            return AVIF_RESULT_INVALID_ARGUMENT;
+        }
+        if (!state.api) {
+            state.api = std::make_shared<api_bundle>();
+        }
+        state.pools.emplace(options.id, registry_pool_entry { std::make_shared<encoder_pool>(options, state.api) });
+        return AVIF_RESULT_OK;
+    } catch (const std::bad_alloc &) {
+        set_diagnostic(diag, "Out of memory creating NVENC pool");
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    } catch (const std::exception & e) {
+        set_diagnostic(diag, "{}", e.what());
+        return AVIF_RESULT_UNKNOWN_ERROR;
+    }
+}
+
+avifResult shutdown_pool(std::string_view pool_id, avifDiagnostics * diag)
+{
+    try {
+        if (pool_id.empty()) {
+            set_diagnostic(diag, "NVENC pool id must not be empty");
+            return AVIF_RESULT_INVALID_ARGUMENT;
+        }
+
+        encoder_pool * pool = nullptr;
+        registry_pool_entry * entry = nullptr;
+        const std::string id(pool_id);
+        registry_state & state = shared_registry_state();
+        {
+            std::unique_lock lock(state.mutex);
+            auto pool_it = state.pools.find(id);
+            if (pool_it == state.pools.end()) {
+                set_diagnostic(diag, "Unknown NVENC pool '{}'", pool_id);
+                return AVIF_RESULT_INVALID_ARGUMENT;
+            }
+            entry = &pool_it->second;
+            if (entry->shutting_down) {
+                set_diagnostic(diag, "NVENC pool '{}' is already shutting down", pool_id);
+                return AVIF_RESULT_INVALID_ARGUMENT;
+            }
+            entry->shutting_down = true;
+            pool = entry->pool.get();
+        }
+
+        pool->begin_shutdown();
+
+        {
+            std::unique_lock lock(state.mutex);
+            state.condition.wait(lock, [entry] { return entry->active_calls == 0; });
+        }
+
+        pool->shutdown();
+
+        {
+            std::scoped_lock lock(state.mutex);
+            state.pools.erase(id);
+        }
+        return AVIF_RESULT_OK;
+    } catch (const std::bad_alloc &) {
+        set_diagnostic(diag, "Out of memory shutting down NVENC pool");
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    } catch (const std::exception & e) {
+        set_diagnostic(diag, "{}", e.what());
+        return AVIF_RESULT_UNKNOWN_ERROR;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Single image encoding
 
 pool_frame::pool_frame(pool_frame && other) noexcept
     : pool_(other.pool_), session_(other.session_), frame_(std::move(other.frame_))
@@ -519,85 +787,6 @@ void pool_frame::attach(encoder_pool * pool, nvenc_session * session, nvenc_sess
     frame_ = std::move(frame);
 }
 
-avifResult create_pool(const registered_pool_options & options, avifDiagnostics * diag)
-{
-    try {
-        const avifResult validate_result = validate_pool_options(options, diag);
-        if (validate_result != AVIF_RESULT_OK) {
-            return validate_result;
-        }
-
-        registry_state & state = shared_registry_state();
-        std::scoped_lock lock(state.mutex);
-        if (state.pools.find(options.id) != state.pools.end()) {
-            set_diagnostic(diag, "NVENC pool '{}' already exists", options.id);
-            return AVIF_RESULT_INVALID_ARGUMENT;
-        }
-        if (!state.api) {
-            state.api = std::make_shared<api_bundle>();
-        }
-        state.pools.emplace(options.id, registry_pool_entry { std::make_unique<encoder_pool>(options, state.api) });
-        return AVIF_RESULT_OK;
-    } catch (const std::bad_alloc &) {
-        set_diagnostic(diag, "Out of memory creating NVENC pool");
-        return AVIF_RESULT_OUT_OF_MEMORY;
-    } catch (const std::exception & e) {
-        set_diagnostic(diag, "{}", e.what());
-        return AVIF_RESULT_UNKNOWN_ERROR;
-    }
-}
-
-avifResult shutdown_pool(std::string_view pool_id, avifDiagnostics * diag)
-{
-    try {
-        if (pool_id.empty()) {
-            set_diagnostic(diag, "NVENC pool id must not be empty");
-            return AVIF_RESULT_INVALID_ARGUMENT;
-        }
-
-        encoder_pool * pool = nullptr;
-        registry_pool_entry * entry = nullptr;
-        const std::string id(pool_id);
-        registry_state & state = shared_registry_state();
-        {
-            std::unique_lock lock(state.mutex);
-            auto pool_it = state.pools.find(id);
-            if (pool_it == state.pools.end()) {
-                set_diagnostic(diag, "Unknown NVENC pool '{}'", pool_id);
-                return AVIF_RESULT_INVALID_ARGUMENT;
-            }
-            entry = &pool_it->second;
-            if (entry->shutting_down) {
-                set_diagnostic(diag, "NVENC pool '{}' is already shutting down", pool_id);
-                return AVIF_RESULT_INVALID_ARGUMENT;
-            }
-            entry->shutting_down = true;
-            pool = entry->pool.get();
-        }
-
-        pool->begin_shutdown();
-
-        {
-            std::unique_lock lock(state.mutex);
-            state.condition.wait(lock, [entry] { return entry->active_calls == 0; });
-        }
-
-        pool->shutdown();
-
-        {
-            std::scoped_lock lock(state.mutex);
-            state.pools.erase(id);
-        }
-        return AVIF_RESULT_OK;
-    } catch (const std::bad_alloc &) {
-        set_diagnostic(diag, "Out of memory shutting down NVENC pool");
-        return AVIF_RESULT_OUT_OF_MEMORY;
-    } catch (const std::exception & e) {
-        set_diagnostic(diag, "{}", e.what());
-        return AVIF_RESULT_UNKNOWN_ERROR;
-    }
-}
-
 avifResult acquire_pool_frame(const session_request & request, pool_frame * frame, avifDiagnostics * diag)
 {
     registry_state & state = shared_registry_state();
@@ -625,7 +814,9 @@ avifResult acquire_pool_frame(const session_request & request, pool_frame * fram
             }
 
             if (entry->shutting_down) {
-                set_diagnostic(diag, "NVENC pool '{}' is shutting down", request.pool_id.empty() ? state.pools.begin()->first : request.pool_id);
+                set_diagnostic(diag,
+                               "NVENC pool '{}' is shutting down",
+                               request.pool_id.empty() ? state.pools.begin()->first : request.pool_id);
                 return AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
             }
 
@@ -633,7 +824,7 @@ avifResult acquire_pool_frame(const session_request & request, pool_frame * fram
             pool = entry->pool.get();
         }
 
-        const avifResult result = pool->acquire(request, frame, diag);
+        const avifResult result = pool->acquire_single(request, frame, diag);
 
         {
             std::scoped_lock lock(state.mutex);
@@ -662,6 +853,114 @@ avifResult acquire_pool_frame(const session_request & request, pool_frame * fram
         set_diagnostic(diag, "{}", e.what());
         return AVIF_RESULT_UNKNOWN_ERROR;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Layered image encoding
+
+layered_group::layered_group(std::unique_ptr<impl> state) : state_(std::move(state))
+{
+}
+
+layered_group::~layered_group()
+{
+    cancel();
+}
+
+avifResult layered_group::acquire_upload_image(bool alpha, const session_request & request, const avifImage * image, avifDiagnostics * diag)
+{
+    std::shared_ptr<nvenc_session::layered_job> job;
+    uint32_t stream;
+    {
+        std::scoped_lock lock(state_->mutex);
+        job = state_->jobs[alpha ? 1 : 0];
+        stream = state_->stream_indices[alpha ? 1 : 0];
+    }
+    if (!job) {
+        set_diagnostic(diag, "Unexpected NVENC layered stream");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    const auto result = job->acquire_upload_image(stream, request.config, image, diag, request.force_keyframe);
+    if (result != AVIF_RESULT_OK) {
+        cancel();
+    }
+    return result;
+}
+
+avifResult layered_group::submit_job(bool alpha, std::vector<nvenc_session::encoded_frame> * output, avifDiagnostics * diag)
+{
+    std::shared_ptr<nvenc_session::layered_job> job;
+    uint32_t stream;
+    {
+        std::scoped_lock lock(state_->mutex);
+        job = state_->jobs[alpha ? 1 : 0];
+        stream = state_->stream_indices[alpha ? 1 : 0];
+    }
+    if (!job) {
+        set_diagnostic(diag, "Unexpected NVENC layered stream");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    const auto result = job->submit_job(stream, output, diag);
+    if (result != AVIF_RESULT_OK) {
+        cancel();
+    }
+    return result;
+}
+
+void layered_group::cancel() noexcept
+{
+    std::shared_ptr<nvenc_session::layered_job> jobs[2];
+    {
+        std::scoped_lock lock(state_->mutex);
+        state_->cancelled = true;
+        jobs[0] = state_->jobs[0];
+        jobs[1] = state_->jobs[1];
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        if (jobs[i] && (!i || jobs[i] != jobs[0])) {
+            jobs[i]->cancel();
+        }
+    }
+}
+
+avifResult acquire_layered_group(const session_request & color,
+                                 const session_request * alpha,
+                                 uint32_t layer_count,
+                                 image_size final_size,
+                                 std::shared_ptr<layered_group> * group,
+                                 avifDiagnostics * diag)
+{
+    auto & state = shared_registry_state();
+    registry_pool_entry * entry = nullptr;
+    std::shared_ptr<encoder_pool> pool;
+    {
+        std::scoped_lock lock(state.mutex);
+        if (!color.pool_id.empty()) {
+            auto it = state.pools.find(color.pool_id);
+            if (it != state.pools.end()) {
+                entry = &it->second;
+            }
+        } else if (state.pools.size() == 1) {
+            entry = &state.pools.begin()->second;
+        }
+        if (!entry) {
+            set_diagnostic(diag, "Select a registered NVENC pool for layered encoding");
+            return state.pools.empty() ? AVIF_RESULT_NO_CODEC_AVAILABLE : AVIF_RESULT_INVALID_CODEC_SPECIFIC_OPTION;
+        }
+        if (entry->shutting_down) {
+            set_diagnostic(diag, "NVENC pool is shutting down");
+            return AVIF_RESULT_UNKNOWN_ERROR;
+        }
+        ++entry->active_calls;
+        pool = entry->pool;
+    }
+    const auto result = pool->acquire_layered(color, alpha, layer_count, final_size, group, diag);
+    {
+        std::scoped_lock lock(state.mutex);
+        --entry->active_calls;
+    }
+    state.condition.notify_all();
+    return result;
 }
 
 } // namespace avif_nvenc

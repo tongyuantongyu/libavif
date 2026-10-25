@@ -86,6 +86,9 @@ typedef struct avifNvencPoolConfig
 } avifNvencPoolConfig;
 
 // Registers the custom NVENC AV1 encoder as codec name "nvenc".
+// Supports single images and pre-scaled layered images, but not animations.
+// When encoding layered images, you must not expect a later started avifEncoder
+// to finish encoding earlier when sharing one session pool.
 AVIF_NVENC_API avifResult avifNvencRegister(void);
 
 // Returns the registered codec choice, or AVIF_CODEC_CHOICE_AUTO if not registered.
@@ -94,9 +97,8 @@ AVIF_NVENC_API avifCodecChoice avifNvencCodecChoice(void);
 // Creates a reusable NVENC pool.
 AVIF_NVENC_API avifResult avifNvencCreatePool(const avifNvencPoolConfig * config, avifDiagnostics * diag);
 
-// Shuts down a previously created NVENC pool. This waits for outstanding work
-// to drain before freeing the pool-owned NVENC sessions. Call this for every
-// pool before process exit.
+// Shuts down a previously created NVENC pool. This waits for outstanding
+// avifEncoders to be finished. Call this for every pool before process exit.
 AVIF_NVENC_API avifResult avifNvencShutdownPool(const char * poolId, avifDiagnostics * diag);
 
 // Returns the contrib module version string.

@@ -90,6 +90,7 @@ struct session_key
     uint32_t max_encode_height = 0;
     uint32_t depth = 8;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+    bool reference_sequence = false;
 
     bool operator==(const session_key & other) const;
     bool operator<(const session_key & other) const;
@@ -97,6 +98,7 @@ struct session_key
 
 struct session_config
 {
+    bool reference_sequence = false;
     uint32_t encode_width = 0;
     uint32_t encode_height = 0;
     uint32_t tile_columns = 0;
@@ -134,6 +136,7 @@ struct session_request
     uint32_t depth = 8;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
     session_config config;
+    bool force_keyframe = false;
     uint16_t film_grain_seed = 0; // Valid if config.film_grain is set. Not part of the config: NVENC ignores it.
 };
 

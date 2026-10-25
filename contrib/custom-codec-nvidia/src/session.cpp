@@ -11,6 +11,7 @@
 #include <windows.h>
 #endif
 
+#include "scheduler.h"
 #include "session.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <deque>
 #include <format>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -87,12 +89,7 @@ uint32_t av1_chroma_format_idc_for(NV_ENC_BUFFER_FORMAT format)
     return 1;
 }
 
-void copy_msb_plane_16(const uint8_t * source,
-                       uint32_t source_row_bytes,
-                       uint8_t * destination,
-                       uint32_t destination_pitch,
-                       uint32_t width,
-                       uint32_t height)
+void copy_msb_plane_16(const uint8_t * source, uint32_t source_row_bytes, uint8_t * destination, uint32_t destination_pitch, uint32_t width, uint32_t height)
 {
     // libyuv 16-bit strides are expressed in uint16_t elements.
     libyuv::ConvertToMSBPlane_16(reinterpret_cast<const uint16_t *>(source),
@@ -292,16 +289,16 @@ struct nvenc_session::impl
         size_t slot_index = kInvalidSlotIndex;
         uint32_t pitch = 0;
         session_config config;
+        NV_ENC_FILM_GRAIN_PARAMS_AV1 picture_film_grain {};
+        bool sequence_start = false;
+        bool force_keyframe = false;
         request_stage stage = request_stage::queued;
         request_result result;
         bool ready_notification_sent = false;
         std::promise<void> ready_promise;
     };
 
-    impl(const session_key & key,
-         const session_config & config,
-         CUcontext cuda_context,
-         const NV_ENCODE_API_FUNCTION_LIST & api_functions)
+    impl(const session_key & key, const session_config & config, CUcontext cuda_context, const NV_ENCODE_API_FUNCTION_LIST & api_functions)
         : key(key), active_config(config), cuda_context(cuda_context), api(api_functions)
     {
         try {
@@ -450,12 +447,15 @@ struct nvenc_session::impl
         }
         const auto min_width = static_cast<uint32_t>(capability(NV_ENC_CAPS_WIDTH_MIN));
         const auto min_height = static_cast<uint32_t>(capability(NV_ENC_CAPS_HEIGHT_MIN));
-        if (key.max_encode_width < min_width || key.max_encode_height < min_height) {
+        if (active_config.encode_width < min_width || active_config.encode_height < min_height) {
             throw msg_exception(
                 std::format("The selected GPU requires image dimensions at least {}x{} for NVENC AV1", min_width, min_height));
         }
         if (key.depth > 8 && capability(NV_ENC_CAPS_SUPPORT_10BIT_ENCODE) == 0) {
             throw msg_exception("The selected GPU does not support NVENC 10-bit AV1 encoding");
+        }
+        if (key.reference_sequence && !capability(NV_ENC_CAPS_SUPPORT_DYN_RES_CHANGE)) {
+            throw msg_exception("The selected GPU does not support NVENC AV1 dynamic resolution changes");
         }
         monochrome_supported = (capability(NV_ENC_CAPS_SUPPORT_MONOCHROME) != 0);
     }
@@ -472,7 +472,7 @@ struct nvenc_session::impl
         *config_out = preset_config.presetCfg;
         config_out->version = NV_ENC_CONFIG_VER;
         config_out->profileGUID = NV_ENC_AV1_PROFILE_MAIN_GUID;
-        config_out->gopLength = 1;
+        config_out->gopLength = config.reference_sequence ? NVENC_INFINITE_GOPLENGTH : 1;
         config_out->frameIntervalP = 1;
         config_out->monoChromeEncoding = should_use_monochrome(config) ? 1u : 0u;
         config_out->rcParams.version = NV_ENC_RC_PARAMS_VER;
@@ -527,9 +527,19 @@ struct nvenc_session::impl
         }
         av1_config.outputAnnexBFormat = 0;
         av1_config.disableSeqHdr = 0;
-        av1_config.repeatSeqHdr = 1;
+        av1_config.repeatSeqHdr = config.reference_sequence ? 0u : 1u;
         av1_config.chromaFormatIDC = av1_chroma_format_idc_for(key.buffer_format);
-        av1_config.idrPeriod = 1;
+        av1_config.idrPeriod = config.reference_sequence ? NVENC_INFINITE_GOPLENGTH : 1;
+        if (config.reference_sequence) {
+            av1_config.maxNumRefFramesInDPB = 1;
+            av1_config.numFwdRefs = NV_ENC_NUM_REF_FRAMES_1;
+            av1_config.numBwdRefs = NV_ENC_NUM_REF_FRAMES_AUTOSELECT;
+            av1_config.enableTimingInfo = 0;
+            av1_config.enableDecoderModelInfo = 0;
+            av1_config.enableFrameIdNumbers = 0;
+            config_out->rcParams.disableIadapt = 1;
+            config_out->rcParams.disableBadapt = 1;
+        }
         av1_config.numTileColumns = config.tile_columns;
         av1_config.numTileRows = config.tile_rows;
         av1_config.colorPrimaries = static_cast<NV_ENC_VUI_COLOR_PRIMARIES>(config.color_primaries);
@@ -561,7 +571,7 @@ struct nvenc_session::impl
         init_out->darHeight = config.encode_height;
         init_out->frameRateNum = 1;
         init_out->frameRateDen = 1;
-        init_out->enablePTD = 1;
+        init_out->enablePTD = config.reference_sequence ? 0u : 1u;
         init_out->reportSliceOffsets = 0;
         init_out->enableSubFrameWrite = 0;
         init_out->enableEncodeAsync = async_events_supported() ? 1u : 0u;
@@ -578,21 +588,28 @@ struct nvenc_session::impl
         check_status("nvEncInitializeEncoder", api.nvEncInitializeEncoder(encoder, &initialize_params));
     }
 
-    void reconfigure_encoder(const session_config & config)
+    void reconfigure_encoder(const session_config & config, bool sequence_start = false)
     {
-        if (active_config == config) {
+        // Grain parameters are updated per picture in reference sequences.
+        // Keep the sequence's default parameters unchanged between resets.
+        auto sequence_config = config;
+        if (config.reference_sequence && !sequence_start) {
+            sequence_config.film_grain = active_config.film_grain;
+        }
+        if (active_config == sequence_config && !sequence_start) {
             return;
         }
 
         NV_ENC_CONFIG updated_encode_config = {};
         NV_ENC_INITIALIZE_PARAMS updated_initialize_params = {};
         NV_ENC_FILM_GRAIN_PARAMS_AV1 updated_film_grain_params = {};
-        build_encoder_state(config, &updated_encode_config, &updated_initialize_params, &updated_film_grain_params);
+        build_encoder_state(sequence_config, &updated_encode_config, &updated_initialize_params, &updated_film_grain_params);
 
         NV_ENC_RECONFIGURE_PARAMS reconfigure_params = { NV_ENC_RECONFIGURE_PARAMS_VER };
         reconfigure_params.reInitEncodeParams = updated_initialize_params;
-        reconfigure_params.resetEncoder = 1;
-        reconfigure_params.forceIDR = 1;
+        const bool reset = !config.reference_sequence || sequence_start;
+        reconfigure_params.resetEncoder = reset ? 1u : 0u;
+        reconfigure_params.forceIDR = reset ? 1u : 0u;
 
         check_status("nvEncReconfigureEncoder", api.nvEncReconfigureEncoder(encoder, &reconfigure_params));
         encode_config = updated_encode_config;
@@ -602,8 +619,10 @@ struct nvenc_session::impl
         }
         initialize_params = updated_initialize_params;
         initialize_params.encodeConfig = &encode_config;
-        active_config = config;
-        frame_index = 0;
+        active_config = sequence_config;
+        if (reset) {
+            frame_index = 0;
+        }
     }
 
     void destroy_drain_wake_event() noexcept
@@ -823,7 +842,7 @@ struct nvenc_session::impl
             throw msg_exception("Missing NVENC encode request");
         }
 
-        reconfigure_encoder(request->config);
+        reconfigure_encoder(request->config, request->sequence_start);
 
         buffer_slot & slot = slots[request->slot_index];
         CONTENT_LIGHT_LEVEL max_cll = {};
@@ -835,7 +854,13 @@ struct nvenc_session::impl
         pic_params.inputWidth = request->config.encode_width;
         pic_params.inputHeight = request->config.encode_height;
         pic_params.inputPitch = request->pitch;
-        pic_params.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA | NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+        const bool keyframe = !request->config.reference_sequence || request->sequence_start || request->force_keyframe;
+        if (keyframe) {
+            pic_params.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA | NV_ENC_PIC_FLAG_FORCEIDR;
+            if (!request->config.reference_sequence || request->sequence_start) {
+                pic_params.encodePicFlags |= NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+            }
+        }
         pic_params.frameIdx = frame_index;
         pic_params.inputTimeStamp = frame_index;
         pic_params.inputDuration = 1;
@@ -843,9 +868,19 @@ struct nvenc_session::impl
         pic_params.outputBitstream = slot.output;
         pic_params.bufferFmt = key.buffer_format;
         pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
-        pic_params.pictureType = NV_ENC_PIC_TYPE_IDR;
+        pic_params.pictureType = keyframe ? NV_ENC_PIC_TYPE_IDR : NV_ENC_PIC_TYPE_P;
         pic_params.codecPicParams.av1PicParams.displayPOCSyntax = frame_index;
         pic_params.codecPicParams.av1PicParams.refPicFlag = 1;
+        if (request->config.reference_sequence) {
+            pic_params.codecPicParams.av1PicParams.tileConfigUpdate = 1;
+            pic_params.codecPicParams.av1PicParams.numTileColumns = request->config.tile_columns;
+            pic_params.codecPicParams.av1PicParams.numTileRows = request->config.tile_rows;
+            if (request->config.film_grain) {
+                request->config.film_grain->to_nvenc(&request->picture_film_grain);
+                pic_params.codecPicParams.av1PicParams.filmGrainParamsUpdate = 1;
+                pic_params.codecPicParams.av1PicParams.filmGrainParams = &request->picture_film_grain;
+            }
+        }
         pic_params.codecPicParams.av1PicParams.pMaxCll = request->config.clli.has_value() ? &max_cll : nullptr;
         if constexpr (async_events_supported()) {
             pic_params.completionEvent = slot.completion_event;
@@ -914,10 +949,7 @@ struct nvenc_session::impl
         signal_async_drain_event();
     }
 
-    void fail_request(const std::shared_ptr<encode_request> & request,
-                      avifResult result_code,
-                      std::string error,
-                      bool notify_submit_frame = true)
+    void fail_request(const std::shared_ptr<encode_request> & request, avifResult result_code, std::string error, bool notify_submit_frame = true)
     {
         bool should_notify = false;
         if (request->stage == request_stage::finished) {
@@ -1051,8 +1083,7 @@ struct nvenc_session::impl
                         wait_handles.push_back(static_cast<HANDLE>(drain_wake_event));
                     }
 
-                    const DWORD wait_result =
-                        WaitForMultipleObjects(wait_handles.size(), wait_handles.data(), FALSE, 1000);
+                    const DWORD wait_result = WaitForMultipleObjects(wait_handles.size(), wait_handles.data(), FALSE, 1000);
                     if (wait_result == WAIT_OBJECT_0 + wait_requests.size() || wait_result == WAIT_TIMEOUT) {
                         continue;
                     }
@@ -1061,8 +1092,7 @@ struct nvenc_session::impl
                         break;
                     }
                     if (wait_result == WAIT_FAILED) {
-                        throw msg_exception(
-                            std::format("WaitForMultipleObjects failed with error {}", GetLastError()));
+                        throw msg_exception(std::format("WaitForMultipleObjects failed with error {}", GetLastError()));
                     }
                     throw msg_exception(std::format("Unexpected WaitForMultipleObjects return value {}", wait_result));
                 }
@@ -1115,7 +1145,397 @@ struct nvenc_session::impl
     std::thread drainer;
 };
 
-nvenc_session::frame_buffer::frame_buffer(nvenc_session * session, size_t slot_index) noexcept : session_(session), slot_index_(slot_index) {}
+struct nvenc_session::layered_job::impl
+{
+    struct picture
+    {
+        session_config config;
+        bool force_keyframe = false;
+    };
+
+    struct stream
+    {
+        std::vector<frame_buffer> inputs;
+        std::vector<picture> requests;
+        std::vector<encoded_frame> encoded;
+        size_t occupied = 0;
+        size_t uploading = 0;
+        bool queued = false;
+        bool running = false;
+        bool done = false;
+        bool collected = false;
+    } streams[2];
+
+    std::shared_ptr<layered_state> owner;
+    std::shared_ptr<impl> notification_next;
+    layered_completion on_complete;
+    uint64_t arrival = 0;
+    uint32_t layers = 0;
+    uint32_t stream_count = 0;
+    size_t active_tasks = 0;
+    bool cancelled = false;
+    bool cleaned = true; // No session ownership until registration commits.
+    avifResult result = AVIF_RESULT_OK;
+    std::string error;
+};
+
+// All coordination between users of a reference-sequence session lives here.
+// Job state outlives the session when callers retain compressed results.
+struct nvenc_session::layered_state
+{
+    using job = layered_job::impl;
+
+    explicit layered_state(nvenc_session * session) : session(session), worker([this] { run(); }) {}
+
+    ~layered_state() { stop(); }
+
+    void stop()
+    {
+        {
+            std::scoped_lock lock(mutex);
+            stopping = true;
+        }
+        condition.notify_all();
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+    void release_inputs_locked(job::stream & stream)
+    {
+        stream.inputs.clear();
+        watermark.release(stream.occupied);
+        stream.occupied = 0;
+    }
+
+    void cleanup_locked(const std::shared_ptr<job> & g)
+    {
+        if (g->cleaned || g->active_tasks) {
+            return;
+        }
+
+        for (uint32_t i = 0; i < g->stream_count; ++i) {
+            if (g->streams[i].uploading || (!g->cancelled && !g->streams[i].done)) {
+                return;
+            }
+        }
+
+        watermark.remove(g->arrival);
+        jobs.erase(g->arrival);
+        g->cleaned = true;
+
+        // Intrusive notification list: cancellation and cleanup never allocate.
+        g->notification_next = std::move(notifications);
+        notifications = g;
+        condition.notify_all();
+    }
+
+    void notify_completed() noexcept
+    {
+        std::shared_ptr<job> list;
+        {
+            std::scoped_lock lock(mutex);
+            list = std::move(notifications);
+        }
+
+        while (list) {
+            auto next = std::move(list->notification_next);
+            auto callback = std::move(list->on_complete);
+            if (callback) {
+                callback(list->result);
+            }
+            list = std::move(next);
+        }
+    }
+
+    void cancel_locked(const std::shared_ptr<job> & g, avifResult result, std::string_view error)
+    {
+        if (g->cleaned) {
+            return;
+        }
+        if (!g->cancelled) {
+            g->cancelled = true;
+            g->result = result;
+            g->error.assign(error.substr(0, 1023));
+        }
+
+        for (uint32_t i = 0; i < g->stream_count; ++i) {
+            auto & stream = g->streams[i];
+            if (!stream.running && !stream.uploading) {
+                release_inputs_locked(stream);
+                stream.done = true;
+            }
+        }
+        cleanup_locked(g);
+        condition.notify_all();
+    }
+
+    void cancel(const std::shared_ptr<job> & g) noexcept
+    {
+        {
+            std::scoped_lock lock(mutex);
+            cancel_locked(g, AVIF_RESULT_UNKNOWN_ERROR, "Layered NVENC image cancelled");
+        }
+        notify_completed();
+    }
+
+    avifResult acquire_upload_image(const std::shared_ptr<job> & g,
+                                    uint32_t index,
+                                    const session_config & config,
+                                    const avifImage * image,
+                                    avifDiagnostics * diag,
+                                    bool force_keyframe)
+    {
+        frame_buffer frame;
+        try {
+            std::unique_lock lock(mutex);
+            if (g->cancelled) {
+                set_diagnostic(diag, "{}", g->error);
+                return g->result;
+            }
+            if (index >= g->stream_count || g->cleaned || g->streams[index].queued) {
+                set_diagnostic(diag, "Unexpected NVENC layer upload");
+                return AVIF_RESULT_INVALID_ARGUMENT;
+            }
+            auto & stream = g->streams[index];
+            condition.wait(lock, [&] { return g->cancelled || watermark.can_upload(g->arrival); });
+            if (g->cancelled) {
+                set_diagnostic(diag, "{}", g->error);
+                return g->result;
+            }
+            auto result = session->acquire_frame(&frame, diag);
+            if (result == AVIF_RESULT_OK) {
+                watermark.upload(g->arrival);
+                ++stream.occupied;
+                ++stream.uploading;
+                lock.unlock();
+                result = session->upload_image(&frame, config, image, diag);
+                lock.lock();
+                --stream.uploading;
+            }
+            if (result != AVIF_RESULT_OK || g->cancelled) {
+                frame = {};
+                cancel_locked(g, result == AVIF_RESULT_OK ? g->result : result, result == AVIF_RESULT_OK ? g->error : "NVENC layer upload failed");
+                set_diagnostic(diag, "{}", g->error);
+                result = g->result;
+            } else {
+                stream.inputs.push_back(std::move(frame));
+                stream.requests.push_back({ config, force_keyframe });
+                if (stream.requests.size() == g->layers) {
+                    ready.emplace_back(g, index);
+                    stream.queued = true;
+                    ++g->active_tasks;
+                }
+            }
+            condition.notify_all();
+
+            lock.unlock();
+            notify_completed();
+            return result;
+        } catch (const std::bad_alloc &) {
+            std::scoped_lock lock(mutex);
+            frame = {};
+            cancel_locked(g, AVIF_RESULT_OUT_OF_MEMORY, "Out of memory staging NVENC layers");
+        } catch (const std::exception & e) {
+            std::scoped_lock lock(mutex);
+            frame = {};
+            cancel_locked(g, AVIF_RESULT_UNKNOWN_ERROR, e.what());
+        }
+        notify_completed();
+        set_diagnostic(diag, "{}", g->error);
+        return g->result;
+    }
+
+    avifResult submit_job(const std::shared_ptr<job> & g, uint32_t index, std::vector<encoded_frame> * output, avifDiagnostics * diag)
+    {
+        std::unique_lock lock(mutex);
+        if (!output || index >= g->stream_count) {
+            set_diagnostic(diag, "Invalid NVENC layered stream");
+            return AVIF_RESULT_INVALID_ARGUMENT;
+        }
+        auto & stream = g->streams[index];
+        if (stream.requests.size() != g->layers) {
+            cancel_locked(g, AVIF_RESULT_INVALID_ARGUMENT, "Incomplete NVENC layered image");
+        }
+        condition.wait(lock, [&] { return g->cancelled || stream.done; });
+        auto result = g->result;
+        if (g->cancelled) {
+            set_diagnostic(diag, "{}", g->error);
+        } else if (stream.collected) {
+            set_diagnostic(diag, "NVENC layered results already collected");
+            result = AVIF_RESULT_INVALID_ARGUMENT;
+        } else {
+            *output = std::move(stream.encoded);
+            stream.collected = true;
+        }
+        lock.unlock();
+        notify_completed();
+        return result;
+    }
+
+    void run() noexcept
+    {
+        for (;;) {
+            std::shared_ptr<job> g;
+            uint32_t index;
+            std::vector<frame_buffer> frames;
+            bool execute;
+            {
+                std::unique_lock lock(mutex);
+                condition.wait(lock, [&] { return stopping || !ready.empty(); });
+                if (ready.empty()) {
+                    return;
+                }
+                g = std::move(ready.front().first);
+                index = ready.front().second;
+                ready.pop_front();
+                auto & stream = g->streams[index];
+                stream.running = true;
+                frames = std::move(stream.inputs);
+                execute = !g->cancelled;
+            }
+            std::vector<encoded_frame> encoded;
+            avifDiagnostics diag {};
+            avifResult result = AVIF_RESULT_OK;
+            if (execute) {
+                try {
+                    const auto & requests = g->streams[index].requests;
+                    encoded.resize(requests.size());
+                    for (size_t i = 0; i < requests.size(); ++i) {
+                        result = session->submit_frame(&frames[i], requests[i].config, &encoded[i], &diag, i == 0, requests[i].force_keyframe);
+                        if (result != AVIF_RESULT_OK) {
+                            break;
+                        }
+                    }
+                } catch (const std::bad_alloc &) {
+                    result = AVIF_RESULT_OUT_OF_MEMORY;
+                } catch (...) {
+                    result = AVIF_RESULT_UNKNOWN_ERROR;
+                }
+            }
+            frames.clear();
+
+            {
+                std::scoped_lock lock(mutex);
+                auto & stream = g->streams[index];
+                stream.running = false;
+                release_inputs_locked(stream);
+                stream.done = true;
+                --g->active_tasks;
+                if (result != AVIF_RESULT_OK) {
+                    failed = true;
+                    for (auto it = jobs.begin(); it != jobs.end();) {
+                        auto affected = (it++)->second;
+                        cancel_locked(affected, result, diag.error[0] ? diag.error : "NVENC layered batch failed");
+                    }
+                } else if (!g->cancelled) {
+                    stream.encoded = std::move(encoded);
+                }
+                cleanup_locked(g);
+                condition.notify_all();
+            }
+
+            notify_completed();
+        }
+    }
+
+    nvenc_session * session;
+    std::mutex mutex;
+    std::condition_variable condition;
+    upload_watermark watermark { kFrameCapacity };
+    std::map<uint64_t, std::shared_ptr<job>> jobs;
+    std::deque<std::pair<std::shared_ptr<job>, uint32_t>> ready;
+    std::shared_ptr<job> notifications;
+    uint64_t next_arrival = 0;
+    bool failed = false;
+    bool stopping = false;
+    std::thread worker;
+};
+
+nvenc_session::layered_job::layered_job(std::shared_ptr<impl> state) : impl_(std::move(state))
+{
+}
+
+nvenc_session::layered_job::~layered_job()
+{
+    cancel();
+}
+
+avifResult nvenc_session::layered_job::acquire_upload_image(uint32_t stream,
+                                                            const session_config & config,
+                                                            const avifImage * image,
+                                                            avifDiagnostics * diag,
+                                                            bool force_keyframe)
+{
+    return impl_->owner->acquire_upload_image(impl_, stream, config, image, diag, force_keyframe);
+}
+
+avifResult nvenc_session::layered_job::submit_job(uint32_t stream, std::vector<encoded_frame> * output, avifDiagnostics * diag)
+{
+    return impl_->owner->submit_job(impl_, stream, output, diag);
+}
+
+void nvenc_session::layered_job::cancel() noexcept
+{
+    impl_->owner->cancel(impl_);
+}
+
+avifResult nvenc_session::create_layered_job(uint32_t layers,
+                                             uint32_t streams,
+                                             layered_completion on_complete,
+                                             std::shared_ptr<layered_job> * output,
+                                             avifDiagnostics * diag)
+{
+    if (!layered_ || !output || layers < 2 || layers > 4 || !streams || streams > 2) {
+        set_diagnostic(diag, "Invalid NVENC layered job registration");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    try {
+        auto g = std::make_shared<layered_job::impl>();
+        g->owner = layered_;
+        g->layers = layers;
+        g->stream_count = streams;
+        g->error.reserve(1024);
+        for (uint32_t i = 0; i < streams; ++i) {
+            g->streams[i].inputs.reserve(layers);
+            g->streams[i].requests.reserve(layers);
+        }
+        // Allocate the handle before registration; its destructor must not
+        // cancel unregistered state if this operation subsequently fails.
+        auto handle = std::shared_ptr<layered_job>(new layered_job(g));
+        std::unique_lock lock(layered_->mutex);
+        if (layered_->failed || layered_->stopping) {
+            g->cleaned = true;
+            set_diagnostic(diag, "NVENC reference session is unavailable");
+            return AVIF_RESULT_UNKNOWN_ERROR;
+        }
+        g->arrival = layered_->next_arrival++;
+        try {
+            layered_->watermark.admit(g->arrival, layers * streams);
+            layered_->jobs.emplace(g->arrival, g);
+        } catch (...) {
+            layered_->watermark.remove(g->arrival);
+            g->cleaned = true;
+            throw;
+        }
+        g->on_complete = std::move(on_complete);
+        g->cleaned = false;
+        lock.unlock();
+        *output = std::move(handle);
+        return AVIF_RESULT_OK;
+    } catch (const std::bad_alloc &) {
+        set_diagnostic(diag, "Out of memory registering NVENC layered job");
+        return AVIF_RESULT_OUT_OF_MEMORY;
+    } catch (const std::exception & e) {
+        set_diagnostic(diag, "{}", e.what());
+        return AVIF_RESULT_UNKNOWN_ERROR;
+    }
+}
+
+nvenc_session::frame_buffer::frame_buffer(nvenc_session * session, size_t slot_index) noexcept
+    : session_(session), slot_index_(slot_index)
+{
+}
 
 nvenc_session::frame_buffer::frame_buffer(frame_buffer && other) noexcept
 {
@@ -1165,9 +1585,26 @@ nvenc_session::nvenc_session(const session_key & key,
                              const NV_ENCODE_API_FUNCTION_LIST & api_functions)
     : impl_(std::make_unique<impl>(key, config, cuda_context, api_functions))
 {
+    if (key.reference_sequence) {
+        layered_ = std::make_shared<layered_state>(this);
+    }
 }
 
-nvenc_session::~nvenc_session() = default;
+nvenc_session::~nvenc_session()
+{
+    if (layered_) {
+        layered_->stop();
+    }
+}
+
+bool nvenc_session::is_usable() const noexcept
+{
+    if (!layered_) {
+        return true;
+    }
+    std::scoped_lock lock(layered_->mutex);
+    return !layered_->failed && !layered_->stopping;
+}
 
 void nvenc_session::release_frame(frame_buffer * frame) const noexcept
 {
@@ -1198,10 +1635,7 @@ avifResult nvenc_session::acquire_frame(frame_buffer * frame, avifDiagnostics * 
     }
 }
 
-avifResult nvenc_session::upload_image(frame_buffer * frame,
-                                       const session_config & config,
-                                       const avifImage * image,
-                                       avifDiagnostics * diag) const
+avifResult nvenc_session::upload_image(frame_buffer * frame, const session_config & config, const avifImage * image, avifDiagnostics * diag) const
 {
     try {
         if (!frame || !*frame) {
@@ -1226,7 +1660,9 @@ avifResult nvenc_session::upload_image(frame_buffer * frame,
 avifResult nvenc_session::submit_frame(frame_buffer * frame,
                                        const session_config & config,
                                        encoded_frame * encoded,
-                                       avifDiagnostics * diag) const
+                                       avifDiagnostics * diag,
+                                       bool sequence_start,
+                                       bool force_keyframe) const
 {
     try {
         if (!frame || !*frame) {
@@ -1240,6 +1676,8 @@ avifResult nvenc_session::submit_frame(frame_buffer * frame,
         request->slot_index = frame->slot_index_;
         request->pitch = frame->pitch_;
         request->config = config;
+        request->sequence_start = sequence_start;
+        request->force_keyframe = force_keyframe;
         auto ready_future = request->ready_promise.get_future();
 
         {
@@ -1260,8 +1698,7 @@ avifResult nvenc_session::submit_frame(frame_buffer * frame,
             {
                 std::unique_lock lock(impl_->state_mutex);
                 if (request->result.result != AVIF_RESULT_OK) {
-                    set_diagnostic(diag, "{}",
-                                   request->result.error.empty() ? "NVENC encode failed" : request->result.error);
+                    set_diagnostic(diag, "{}", request->result.error.empty() ? "NVENC encode failed" : request->result.error);
                     return request->result.result;
                 }
             }

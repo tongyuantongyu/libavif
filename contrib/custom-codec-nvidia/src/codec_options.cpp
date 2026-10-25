@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -211,8 +211,7 @@ int interpolate_qp_curve(int qp, const std::array<std::pair<int, int>, N> & knot
             const int denominator = x1 - x0;
             const int numerator = y0 * (x1 - qp) + y1 * (qp - x0);
             // Round to nearest integer, including negative offsets.
-            return numerator >= 0 ? (numerator + denominator / 2) / denominator
-                                  : -((-numerator + denominator / 2) / denominator);
+            return numerator >= 0 ? (numerator + denominator / 2) / denominator : -((-numerator + denominator / 2) / denominator);
         }
     }
     return knots.back().second;
@@ -230,18 +229,14 @@ quantization_defaults tuned_quantization(int qp)
 {
     // QP uses NVENC's full 0-255 index scale. Strong AQ at low QP hurts
     // very-high-quality rate/distortion, so strength increases with QP.
-    static constexpr std::array<std::pair<int, int>, 6> aq = {
-        { { 0, 2 }, { 16, 2 }, { 64, 8 }, { 96, 13 }, { 128, 15 }, { 255, 15 } }
-    };
+    static constexpr std::array<std::pair<int, int>, 6> aq = { { { 0, 2 }, { 16, 2 }, { 64, 8 }, { 96, 13 }, { 128, 15 }, { 255, 15 } } };
     static constexpr std::array<std::pair<int, int>, 7> y_dc = {
         { { 0, 0 }, { 16, -8 }, { 32, -16 }, { 64, -24 }, { 96, -24 }, { 128, -16 }, { 255, -16 } }
     };
     static constexpr std::array<std::pair<int, int>, 6> uv_dc = {
         { { 0, 0 }, { 16, -16 }, { 32, -16 }, { 64, -24 }, { 96, -16 }, { 255, -16 } }
     };
-    static constexpr std::array<std::pair<int, int>, 5> uv_ac = {
-        { { 0, 0 }, { 96, 0 }, { 128, -8 }, { 160, -16 }, { 255, -16 } }
-    };
+    static constexpr std::array<std::pair<int, int>, 5> uv_ac = { { { 0, 0 }, { 96, 0 }, { 128, -8 }, { 160, -16 }, { 255, -16 } } };
     return { static_cast<uint8_t>(interpolate_qp_curve(qp, aq)),
              static_cast<int8_t>(interpolate_qp_curve(qp, y_dc)),
              static_cast<int8_t>(interpolate_qp_curve(qp, uv_dc)),
@@ -434,7 +429,7 @@ avifResult parse_codec_options_internal(const avifCodecSpecificOptions * cs_opti
 bool session_key::operator==(const session_key & other) const
 {
     return gpu == other.gpu && max_encode_width == other.max_encode_width && max_encode_height == other.max_encode_height &&
-           depth == other.depth && buffer_format == other.buffer_format;
+           depth == other.depth && buffer_format == other.buffer_format && reference_sequence == other.reference_sequence;
 }
 
 bool session_key::operator<(const session_key & other) const
@@ -454,22 +449,22 @@ bool session_key::operator<(const session_key & other) const
     if (buffer_format != other.buffer_format) {
         return buffer_format < other.buffer_format;
     }
-    return false;
+    return reference_sequence < other.reference_sequence;
 }
 
 bool session_config::operator==(const session_config & other) const
 {
-    return encode_width == other.encode_width && encode_height == other.encode_height && tile_columns == other.tile_columns &&
-           tile_rows == other.tile_rows && is_alpha == other.is_alpha && min_qp == other.min_qp && max_qp == other.max_qp &&
+    return reference_sequence == other.reference_sequence && encode_width == other.encode_width &&
+           encode_height == other.encode_height && tile_columns == other.tile_columns && tile_rows == other.tile_rows &&
+           is_alpha == other.is_alpha && min_qp == other.min_qp && max_qp == other.max_qp &&
            color_primaries == other.color_primaries && transfer_characteristics == other.transfer_characteristics &&
            matrix_coefficients == other.matrix_coefficients && yuv_range == other.yuv_range &&
            chroma_sample_position == other.chroma_sample_position && compare_guid(preset_guid, other.preset_guid) == 0 &&
            tuning == other.tuning && qp == other.qp && spatial_aq == other.spatial_aq && aq_strength == other.aq_strength &&
            min_part_size == other.min_part_size && max_part_size == other.max_part_size &&
            y_dc_qp_offset == other.y_dc_qp_offset && u_dc_qp_offset == other.u_dc_qp_offset &&
-           v_dc_qp_offset == other.v_dc_qp_offset && cb_qp_offset == other.cb_qp_offset &&
-           cr_qp_offset == other.cr_qp_offset && split_encode_mode == other.split_encode_mode && clli == other.clli &&
-           film_grain == other.film_grain;
+           v_dc_qp_offset == other.v_dc_qp_offset && cb_qp_offset == other.cb_qp_offset && cr_qp_offset == other.cr_qp_offset &&
+           split_encode_mode == other.split_encode_mode && clli == other.clli && film_grain == other.film_grain;
 }
 
 const char * pool_mode_to_string(pool_mode mode)
@@ -495,14 +490,22 @@ avifResult build_session_request(avifEncoder * encoder,
                                  session_request * request,
                                  avifDiagnostics * diag)
 {
-    if (!(add_image_flags & AVIF_ADD_IMAGE_FLAG_SINGLE)) {
-        set_diagnostic(diag, "NVENC custom codec MVP supports still images only");
+    const bool layered = encoder->extraLayerCount > 0;
+    if (!layered && !(add_image_flags & AVIF_ADD_IMAGE_FLAG_SINGLE)) {
+        set_diagnostic(diag, "NVENC custom codec does not support animation");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
-    if (encoder->extraLayerCount > 0) {
-        set_diagnostic(diag, "NVENC custom codec MVP does not support layered images");
+    if (encoder->scalingMode.horizontal.n != encoder->scalingMode.horizontal.d ||
+        encoder->scalingMode.vertical.n != encoder->scalingMode.vertical.d) {
+        set_diagnostic(diag, "NVENC requires pre-scaled inputs; scalingMode is not supported");
         return AVIF_RESULT_NOT_IMPLEMENTED;
     }
+    if (layered && (!encoder->width || !encoder->height)) {
+        set_diagnostic(diag, "NVENC layered images require declared final width/height");
+        return AVIF_RESULT_INVALID_ARGUMENT;
+    }
+    request->config.reference_sequence = layered;
+    request->force_keyframe = (add_image_flags & AVIF_ADD_IMAGE_FLAG_FORCE_KEYFRAME) != 0;
     const NV_ENC_BUFFER_FORMAT buffer_format = buffer_format_for(image, alpha);
     if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
         set_diagnostic(diag, "NVENC custom codec supports YUV420, YUV422, and YUV444 input only");
@@ -535,12 +538,10 @@ avifResult build_session_request(avifEncoder * encoder,
     request->config.min_qp = clamp_qp(alpha ? encoder->minQuantizerAlpha : encoder->minQuantizer) * 4;
     request->config.max_qp = clamp_qp(alpha ? encoder->maxQuantizerAlpha : encoder->maxQuantizer) * 4;
     request->config.color_primaries = alpha ? AVIF_COLOR_PRIMARIES_UNSPECIFIED : image->colorPrimaries;
-    request->config.transfer_characteristics =
-        alpha ? AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED : image->transferCharacteristics;
+    request->config.transfer_characteristics = alpha ? AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED : image->transferCharacteristics;
     request->config.matrix_coefficients = alpha ? AVIF_MATRIX_COEFFICIENTS_UNSPECIFIED : image->matrixCoefficients;
     request->config.yuv_range = alpha ? AVIF_RANGE_FULL : image->yuvRange;
-    request->config.chroma_sample_position =
-        alpha ? AVIF_CHROMA_SAMPLE_POSITION_UNKNOWN : image->yuvChromaSamplePosition;
+    request->config.chroma_sample_position = alpha ? AVIF_CHROMA_SAMPLE_POSITION_UNKNOWN : image->yuvChromaSamplePosition;
     request->config.preset_guid = options.preset_guid;
     request->config.tuning = options.tuning;
     request->config.qp = options.qp.value_or(quality_to_qp(quality));
@@ -569,7 +570,8 @@ avifResult build_session_request(avifEncoder * encoder,
     request->config.split_encode_mode = options.split_encode_mode;
     request->config.film_grain.reset();
     if (!request->config.is_alpha && !options.film_grain_table.empty()) {
-        const avifResult grain_result = load_film_grain_table(options.film_grain_table, &request->config.film_grain, &request->film_grain_seed, diag);
+        const avifResult grain_result =
+            load_film_grain_table(options.film_grain_table, &request->config.film_grain, &request->film_grain_seed, diag);
         if (grain_result != AVIF_RESULT_OK) {
             return grain_result;
         }

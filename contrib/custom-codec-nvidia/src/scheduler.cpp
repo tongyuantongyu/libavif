@@ -2,9 +2,69 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace avif_nvenc
 {
+
+bool upload_watermark::can_admit(size_t remaining) const noexcept
+{
+    return remaining > 0 && remaining <= capacity_;
+}
+
+void upload_watermark::admit(uint64_t arrival, size_t remaining)
+{
+    // Registration does not consume buffers. A new job can register while
+    // capacity is protected for an older job; only its uploads must wait.
+    if (!can_admit(remaining) || !remaining_.emplace(arrival, remaining).second) {
+        throw std::logic_error("Invalid layered image admission");
+    }
+}
+
+bool upload_watermark::can_upload(uint64_t arrival) const
+{
+    const auto current = remaining_.find(arrival);
+    if (current == remaining_.end() || !current->second || used_ == capacity_) {
+        return false;
+    }
+    size_t headroom = 0;
+    auto oldest = remaining_.end();
+    for (auto it = remaining_.begin(); it != remaining_.end(); ++it) {
+        if (it->second && oldest == remaining_.end()) {
+            oldest = it;
+        }
+        headroom = std::max(headroom, it->second - (it == current ? 1 : 0));
+    }
+    return capacity_ - used_ - 1 >= headroom || current == oldest;
+}
+
+void upload_watermark::upload(uint64_t arrival)
+{
+    if (!can_upload(arrival)) {
+        throw std::logic_error("Layer upload violates watermark");
+    }
+    --remaining_.at(arrival);
+    ++used_;
+}
+
+void upload_watermark::release(size_t slots)
+{
+    if (slots > used_) {
+        throw std::logic_error("Layered slot accounting underflow");
+    }
+    used_ -= slots;
+}
+
+void upload_watermark::remove(uint64_t arrival)
+{
+    remaining_.erase(arrival);
+}
+
+size_t upload_watermark::remaining(uint64_t arrival) const
+{
+    return remaining_.at(arrival);
+}
+
 namespace
 {
 
@@ -44,7 +104,8 @@ void acquire_ticket_gate::complete_ticket() noexcept
     ++serving_ticket_;
 }
 
-pool_scheduler::pool_scheduler(size_t max_sessions, size_t frame_capacity) : max_sessions_(max_sessions), frame_capacity_(frame_capacity)
+pool_scheduler::pool_scheduler(size_t max_sessions, size_t frame_capacity)
+    : max_sessions_(max_sessions), frame_capacity_(frame_capacity)
 {
 }
 
@@ -54,7 +115,19 @@ scheduler_decision pool_scheduler::plan_acquire(const session_key & current_key)
     decision.request_epoch = acquire_epoch_ + 1;
     kind_state & current_kind = recompute_targets(current_key, decision.request_epoch);
 
-    if (current_kind.members.size() < current_kind.target_sessions) {
+    for (auto id : session_order_) {
+        const auto & record = sessions_.at(id);
+        if (!record.reusable && !record.active_reservations) {
+            decision.next_action = scheduler_decision::action::create;
+            decision.evict_session_id = id;
+            return decision;
+        }
+    }
+
+    const size_t usable_count = std::count_if(current_kind.members.begin(), current_kind.members.end(), [&](uint64_t id) {
+        return sessions_.at(id).reusable;
+    });
+    if (usable_count < current_kind.target_sessions) {
         decision.next_action = scheduler_decision::action::create;
         if (session_order_.size() >= max_sessions_) {
             decision.evict_session_id = extract_admission_victim(current_key, decision.request_epoch);
@@ -70,6 +143,116 @@ scheduler_decision pool_scheduler::plan_acquire(const session_key & current_key)
         decision.session_id = reusable_session;
     }
     return decision;
+}
+
+scheduler_group_decision pool_scheduler::plan_acquire_group(const std::vector<session_key> & keys)
+{
+    scheduler_group_decision result;
+    std::vector<session_key> unique;
+    std::vector<size_t> counts;
+    for (const auto & key : keys) {
+        auto it = std::find(unique.begin(), unique.end(), key);
+        const auto index = static_cast<size_t>(it - unique.begin());
+        if (it == unique.end()) {
+            unique.push_back(key);
+            counts.push_back(0);
+        }
+        ++counts[index];
+        result.request_sessions.push_back(index);
+    }
+
+    if (unique.empty() || unique.size() > max_sessions_) {
+        throw std::invalid_argument("Insufficient distinct NVENC sessions for atomic acquisition");
+    }
+
+    result.sessions.resize(unique.size());
+    std::vector<uint64_t> protected_ids;
+    for (size_t i = 0; i < unique.size(); ++i) {
+        auto & decision = result.sessions[i];
+        decision.request_epoch = acquire_epoch_ + 1;
+        auto & kind = recompute_targets(unique[i], decision.request_epoch);
+        const session_record * chosen = nullptr;
+        for (auto id : kind.members) {
+            const auto & record = sessions_.at(id);
+            if (record.reusable && counts[i] <= frame_capacity_ && record.active_reservations <= frame_capacity_ - counts[i] &&
+                (!chosen || record.last_served_seq < chosen->last_served_seq)) {
+                chosen = &record;
+                decision.session_id = id;
+            }
+        }
+        // Preserve demand-based warm-up when no other key needs the free slot.
+        if (unique.size() == 1 && session_order_.size() < max_sessions_ && kind.members.size() < kind.target_sessions) {
+            decision.session_id.reset();
+        }
+        if (decision.session_id) {
+            decision.next_action = scheduler_decision::action::reuse;
+            protected_ids.push_back(*decision.session_id);
+        } else {
+            decision.next_action = scheduler_decision::action::create;
+        }
+    }
+
+    size_t free_slots = max_sessions_ - session_order_.size();
+    for (size_t i = 0; i < unique.size(); ++i) {
+        auto & decision = result.sessions[i];
+        if (decision.next_action != scheduler_decision::action::create) {
+            continue;
+        }
+        if (counts[i] > frame_capacity_) {
+            return result;
+        }
+        if (free_slots) {
+            --free_slots;
+            continue;
+        }
+        auto victim = extract_admission_victim(unique[i], decision.request_epoch);
+        if (victim && std::find(protected_ids.begin(), protected_ids.end(), *victim) != protected_ids.end()) {
+            victim.reset();
+        }
+        if (!victim) {
+            const session_record * chosen = nullptr;
+            for (auto id : session_order_) {
+                const auto & record = sessions_.at(id);
+                if (!record.active_reservations && std::find(protected_ids.begin(), protected_ids.end(), id) == protected_ids.end() &&
+                    (!chosen || (!record.reusable && chosen->reusable) ||
+                     (record.reusable == chosen->reusable && record.last_idle_seq < chosen->last_idle_seq))) {
+                    chosen = &record;
+                    victim = id;
+                }
+            }
+        }
+        if (!victim) {
+            return result;
+        }
+        decision.evict_session_id = victim;
+        protected_ids.push_back(*victim);
+    }
+    result.ready = true;
+    return result;
+}
+
+void pool_scheduler::commit_reservations(const std::vector<session_key> & keys, const std::vector<uint64_t> & session_ids)
+{
+    if (keys.size() != session_ids.size()) {
+        throw std::invalid_argument("Mismatched atomic NVENC acquisition");
+    }
+    std::map<uint64_t, size_t> counts;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto & record = sessions_.at(session_ids[i]);
+        if (!record.reusable || record.key != keys[i] || ++counts[session_ids[i]] + record.active_reservations > frame_capacity_) {
+            throw std::logic_error("Invalid atomic NVENC acquisition");
+        }
+    }
+
+    // All validation/allocation precedes ownership changes.
+    for (size_t i = 0; i < keys.size(); ++i) {
+        commit_reservation(acquire_epoch_ + 1, keys[i], session_ids[i]);
+    }
+}
+
+void pool_scheduler::mark_unusable(uint64_t session_id)
+{
+    sessions_.at(session_id).reusable = false;
 }
 
 void pool_scheduler::add_session(uint64_t session_id, const session_key & key)
@@ -323,7 +506,7 @@ std::optional<uint64_t> pool_scheduler::find_round_robin_session_with_capacity(k
         if (session_it == sessions_.end()) {
             continue;
         }
-        if (session_it->second.active_reservations >= frame_capacity_) {
+        if (!session_it->second.reusable || session_it->second.active_reservations >= frame_capacity_) {
             continue;
         }
         kind.rr_next = (index + 1) % session_count;

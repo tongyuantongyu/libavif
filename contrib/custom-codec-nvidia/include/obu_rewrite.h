@@ -6,12 +6,23 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "avif/avif.h"
 
 namespace avif_nvenc
 {
+
+// Normal AV1 headers are preserved. Only layer signalling, maximum dimensions,
+// and optional per-layer deterministic grain seeds are rewritten; tile bytes are intact.
+AVIF_NODISCARD avifResult rewrite_layered_picture(const std::vector<std::vector<uint8_t>> & packets,
+                                                  const std::vector<std::pair<uint32_t, uint32_t>> & sizes,
+                                                  uint32_t final_width,
+                                                  uint32_t final_height,
+                                                  const std::vector<std::optional<uint16_t>> & grain_seeds,
+                                                  std::vector<std::vector<uint8_t>> * output,
+                                                  avifDiagnostics * diag);
 
 // Rewrites a single-frame AV1 bitstream (low overhead format, as produced by NVENC) so that its
 // sequence header uses reduced_still_picture_header. The input must contain exactly one shown

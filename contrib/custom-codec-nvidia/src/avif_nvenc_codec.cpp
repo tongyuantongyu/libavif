@@ -55,7 +55,7 @@ avifResult build_registered_pool_options(const avifNvencPoolConfig * config,
 
     options->id = config->id;
     options->gpu = config->gpu;
-    options->max_sessions = (config->maxSessions == 0) ? 1u : config->maxSessions;
+    options->max_sessions = (config->maxSessions == 0) ? 2u : config->maxSessions;
 
     switch (config->mode) {
         case AVIF_NVENC_POOL_MODE_ON_DEMAND:

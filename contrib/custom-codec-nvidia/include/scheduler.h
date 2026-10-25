@@ -12,6 +12,28 @@
 namespace avif_nvenc
 {
 
+class upload_watermark
+{
+public:
+    explicit upload_watermark(size_t capacity) : capacity_(capacity) {}
+
+    bool can_admit(size_t remaining) const noexcept;
+    void admit(uint64_t arrival, size_t remaining);
+    bool can_upload(uint64_t arrival) const;
+    void upload(uint64_t arrival);
+    void release(size_t slots);
+    void remove(uint64_t arrival);
+
+    size_t used() const noexcept { return used_; }
+
+    size_t remaining(uint64_t arrival) const;
+
+private:
+    size_t capacity_;
+    size_t used_ = 0;
+    std::map<uint64_t, size_t> remaining_;
+};
+
 struct scheduler_decision
 {
     enum class action
@@ -25,6 +47,15 @@ struct scheduler_decision
     uint64_t request_epoch = 0;
     std::optional<uint64_t> session_id;
     std::optional<uint64_t> evict_session_id;
+};
+
+// One decision per distinct key; request_sessions maps each acquisition to its
+// decision, allowing two acquisitions to pin the same physical session.
+struct scheduler_group_decision
+{
+    bool ready = false;
+    std::vector<scheduler_decision> sessions;
+    std::vector<size_t> request_sessions;
 };
 
 class acquire_ticket_gate
@@ -45,6 +76,9 @@ public:
     pool_scheduler(size_t max_sessions, size_t frame_capacity);
 
     scheduler_decision plan_acquire(const session_key & current_key);
+    scheduler_group_decision plan_acquire_group(const std::vector<session_key> & keys);
+    void commit_reservations(const std::vector<session_key> & keys, const std::vector<uint64_t> & session_ids);
+    void mark_unusable(uint64_t session_id);
 
     void add_session(uint64_t session_id, const session_key & key);
     void remove_session(uint64_t session_id);
@@ -67,6 +101,7 @@ private:
         session_key key;
         kind_state * kind = nullptr;
         size_t active_reservations = 0;
+        bool reusable = true;
         uint64_t last_idle_seq = 0;
         uint64_t last_served_seq = 0;
     };
